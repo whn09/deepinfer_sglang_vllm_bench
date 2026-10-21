@@ -1,0 +1,45 @@
+# DeepInfer with Engram / EP traffic over AWS EFA (NCCL GIN on EFA GDA), layered on the base image
+# built from deepseek-ai/DeepInfer's docker/Dockerfile.nvidia (#9). Tracking issue: #10.
+#
+#   docker build -f docker/Dockerfile.deepinfer-efa -t deepinfer:efa --build-arg BASE=deepinfer:nvidia .
+#
+# Run (mlx5 HCAs excluded so GIN uses the EFA NICs; --privileged exposes /dev/infiniband and /dev/gdrdrv):
+#   docker run --gpus all --privileged --ipc=host --network host --shm-size 32g --ulimit memlock=-1 \
+#     -e NCCL_NET_PLUGIN=ofi -e NCCL_GIN_TYPE=5 -e NCCL_IB_HCA=^=<mlx5 HCAs> ...
+ARG BASE=deepinfer:nvidia
+FROM ${BASE}
+
+# EFA userspace: libfabric, rdma-core (efa provider), aws-ofi-nccl. Kernel modules stay on the host.
+ARG EFA_INSTALLER_VERSION=1.50.0
+RUN apt-get update && apt-get install -y --no-install-recommends curl autoconf automake libtool libhwloc-dev \
+    && cd /tmp && curl -fsSL -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
+    && tar xf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && cd aws-efa-installer \
+    && ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify \
+    && cd / && rm -rf /tmp/aws-efa-installer* /var/lib/apt/lists/*
+
+# aws-ofi-nccl from source: the installer's v1.21.1 drives GIN GDAKI backendVersion 0..1 only; NCCL 2.32
+# (pinned by DeepInfer) requests 2, supported since aws/aws-ofi-nccl@452f30269.
+ARG AWS_OFI_NCCL_REF=037d31185
+RUN git clone -q https://github.com/aws/aws-ofi-nccl /tmp/ofi && cd /tmp/ofi && git checkout -q ${AWS_OFI_NCCL_REF} \
+    && ./autogen.sh > /dev/null \
+    && ./configure --prefix=/opt/aws-ofi-nccl-src --with-libfabric=/opt/amazon/efa --with-cuda=/usr/local/cuda --disable-tests > /dev/null \
+    && make -j32 > /dev/null && make install > /dev/null && rm -rf /tmp/ofi
+
+# GDRCopy userspace (libgdrapi.so) for the GPU-initiated GIN; match the host's gdrdrv version.
+ARG GDRCOPY_VERSION=2.5.2
+RUN git clone -q --depth 1 -b v${GDRCOPY_VERSION} https://github.com/NVIDIA/gdrcopy /tmp/gdrcopy \
+    && make -C /tmp/gdrcopy prefix=/usr/local CUDA=/usr/local/cuda lib lib_install > /dev/null \
+    && ldconfig && rm -rf /tmp/gdrcopy
+
+# DeepEP V2.5 with the EFA port (unordered hybrid kernels, GIN type 5, Engram without strong/VA signals on type 5)
+ARG DEEPEP_REPO=https://github.com/whn09/DeepEP
+ARG DEEPEP_REF=b5a7378
+RUN rm -rf /workspace/DeepInfer/vendor/DeepEP \
+    && git clone -q ${DEEPEP_REPO} /workspace/DeepInfer/vendor/DeepEP && cd /workspace/DeepInfer/vendor/DeepEP \
+    && git checkout -q ${DEEPEP_REF} \
+    && git -c url."https://github.com/".insteadOf="git@github.com:" submodule update --init --recursive -q \
+    && python setup.py bdist_wheel --dist-dir /tmp/w > /tmp/deepep_build.log 2>&1 \
+    && pip install --no-deps --force-reinstall /tmp/w/deep_ep-*.whl && rm -rf /tmp/w build
+
+ENV LD_LIBRARY_PATH=/opt/aws-ofi-nccl-src/lib:/opt/amazon/ofi-nccl/lib:/opt/amazon/efa/lib:${LD_LIBRARY_PATH} \
+    NCCL_NET_PLUGIN=ofi
