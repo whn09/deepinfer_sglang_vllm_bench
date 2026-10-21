@@ -19,14 +19,18 @@ import os
 import sys
 from pathlib import Path
 
+# (InferenceX 代码里的名字, 公开 API 里的名字, 显示名)：代码用 p50_*，API 用 median_*
 KEYS = [
-    ("total_tput_per_gpu", "total tok/s/GPU"),
-    ("output_tput_per_gpu", "output tok/s/GPU"),
-    ("median_intvty", "intvty p50"),
-    ("p90_intvty", "intvty p90"),
-    ("median_ttft", "TTFT p50 s"),
-    ("p90_e2el", "E2EL p90 s"),
-    ("duration_seconds", "duration s"),
+    ("total_tput_per_gpu", "total_tput_per_gpu", "total tok/s/GPU"),
+    ("output_tput_per_gpu", "output_tput_per_gpu", "output tok/s/GPU"),
+    ("mean_intvty", "mean_intvty", "intvty mean"),
+    ("p50_intvty", "median_intvty", "intvty p50"),
+    ("p90_intvty", "p90_intvty", "intvty p90"),
+    ("p50_ttft", "median_ttft", "TTFT p50 s"),
+    ("p90_ttft", "p90_ttft", "TTFT p90 s"),
+    ("p50_e2el", "median_e2el", "E2EL p50 s"),
+    ("p90_e2el", "p90_e2el", "E2EL p90 s"),
+    ("duration_seconds", "duration_seconds", "duration s"),
 ]
 
 
@@ -89,9 +93,9 @@ def main() -> None:
     pub = published(Path(args.published), args.topology, args.conc) if args.published else None
     print(f"artifacts: {art}  records={m.get('num_records')}  error_rate={m.get('error_rate')}")
     print(f"{'metric':<20}{'ours':>14}{'InferenceX':>14}{'ours/IX':>10}")
-    for k, label in KEYS:
+    for k, pk, label in KEYS:
         a = m.get(k)
-        b = pub.get(k) if pub else None
+        b = pub.get(pk) if pub else None
         ratio = f"{a / b:.3f}" if a is not None and b else "-"
         fa = f"{a:.2f}" if isinstance(a, (int, float)) else "-"
         fb = f"{b:.2f}" if isinstance(b, (int, float)) else "-"
