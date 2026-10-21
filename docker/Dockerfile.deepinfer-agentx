@@ -1,0 +1,9 @@
+# DeepInfer for AgentX (#5): OpenAI server (deepseek-ai/DeepInfer#147) + host prefix cache (#144) +
+# synthetic acceptance (DEEPINFER_SIMULATE_ACC_LEN), on top of the EFA image (#10).
+#   docker build -f docker/Dockerfile.deepinfer-agentx --build-arg BASE=deepinfer:efa -t deepinfer:agentx .
+ARG BASE=deepinfer:efa
+FROM ${BASE}
+COPY patches/deepinfer-agentx-pr144-pr147-synthetic-al.patch /tmp/agentx.patch
+# #144 adds a Sequence.block_table binding, so deepinfer._C is rebuilt; FastAPI/uvicorn come from requirements-dev.txt
+RUN cd /workspace/DeepInfer && git apply /tmp/agentx.patch && rm /tmp/agentx.patch \
+    && bash scripts/build.sh build > /tmp/deepinfer_c_build.log 2>&1 || (tail -40 /tmp/deepinfer_c_build.log; exit 1)
