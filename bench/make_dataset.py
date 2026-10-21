@@ -20,8 +20,10 @@ prompt=[int,...]），绕开各家 tokenizer / chat template 的差异，保证�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
+from array import array
 from pathlib import Path
 
 SHAREGPT_REPO = "anon8231489123/ShareGPT_Vicuna_unfiltered"
@@ -41,6 +43,30 @@ def load_sharegpt_texts(path: str | None, max_convs: int) -> list[str]:
             if value:
                 texts.append(value)
     return texts
+
+
+def sharegpt_stream(tok, args) -> list[int]:
+    """ShareGPT 拼成的 token 流。tokenize 2 万条对话要 ~40s，按 (tokenizer, 语料, 条数) 缓存在输出目录，
+    同一场景的各个 seed 复用；缓存内容与现算逐 token 相同。"""
+    tok_file = Path(args.tokenizer) / "tokenizer.json"
+    tok_id = hashlib.sha256(tok_file.read_bytes()).hexdigest()[:16] if tok_file.exists() else str(args.tokenizer)
+    key = hashlib.sha256(f"{tok_id}|{args.sharegpt_path or SHAREGPT_REPO}|{args.sharegpt_max_convs}".encode()).hexdigest()[:16]
+    cache = Path(args.out).parent / f".sharegpt_stream_{key}.i32"
+    if cache.exists():
+        stream = array("i")
+        stream.frombytes(cache.read_bytes())
+        return stream.tolist()
+    texts = load_sharegpt_texts(args.sharegpt_path, args.sharegpt_max_convs)
+    stream_list: list[int] = []
+    for t in texts:
+        stream_list.extend(tok.encode(t, add_special_tokens=False))
+        # 每段之间插个换行，避免两段文本粘连成不自然的 token
+        stream_list.extend(tok.encode("\n\n", add_special_tokens=False))
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache.with_suffix(".tmp")
+    tmp.write_bytes(array("i", stream_list).tobytes())
+    tmp.replace(cache)
+    return stream_list
 
 
 def main() -> None:
@@ -66,12 +92,7 @@ def main() -> None:
         pool = [i for i in range(tok.vocab_size) if i not in special]
         prompts = [[rng.choice(pool) for _ in range(args.input_len)] for _ in range(args.num_requests)]
     else:
-        texts = load_sharegpt_texts(args.sharegpt_path, args.sharegpt_max_convs)
-        stream: list[int] = []
-        for t in texts:
-            stream.extend(tok.encode(t, add_special_tokens=False))
-            # 每段之间插个换行，避免两段文本粘连成不自然的 token
-            stream.extend(tok.encode("\n\n", add_special_tokens=False))
+        stream = sharegpt_stream(tok, args)
         need = args.input_len + 1
         if len(stream) < need:
             raise SystemExit(f"ShareGPT token 流只有 {len(stream)} 个 token，不够截 {args.input_len}；调大 --sharegpt-max-convs")
