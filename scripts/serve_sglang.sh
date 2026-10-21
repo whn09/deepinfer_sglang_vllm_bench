@@ -52,11 +52,14 @@ esac
 
 GPUS="${GPUS_OVERRIDE:-$GPUS}"
 bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$GPUS" || exit 1
+# 持久化容器里的 /root/.cache（torch.compile / FlashInfer autotune / JIT 结果），同一栈再次启动时复用，省掉十几到三十几分钟
+mkdir -p "$WORK/cache/sglang"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
     --gpus "\"device=$GPUS\"" \
     --shm-size 32g --ipc=host --network host \
     -v "$MODEL_DIR":/model:ro \
+    -v "$WORK/cache/sglang":/root/.cache \
     -v "$HF_HOME":/root/.cache/huggingface \
     ${HF_TOKEN:+--env HF_TOKEN=$HF_TOKEN} \
     "$IMAGE" \

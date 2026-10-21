@@ -66,11 +66,14 @@ GPUS="${GPUS_OVERRIDE:-$GPUS}"
 DP_PORT_ARGS=()
 [[ " ${PAR[*]} " == *" --data-parallel-size "* ]] && DP_PORT_ARGS=(--data-parallel-rpc-port $((29550 + (PORT - 8000) * 100)))
 bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$GPUS" || exit 1
+# 持久化容器里的 /root/.cache（torch.compile / FlashInfer autotune / JIT 结果），同一栈再次启动时复用，省掉十几到三十几分钟
+mkdir -p "$WORK/cache/vllm"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
     --gpus all --privileged --ipc=host --network host \
     -e CUDA_VISIBLE_DEVICES="$GPUS" \
     -v "$MODEL_DIR":/model:ro \
+    -v "$WORK/cache/vllm":/root/.cache \
     -v "$HF_HOME":/root/.cache/huggingface \
     -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
     -e VLLM_USE_V2_MODEL_RUNNER=1 \
