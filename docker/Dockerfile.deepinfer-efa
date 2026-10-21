@@ -17,19 +17,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl autoconf a
     && ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify \
     && cd / && rm -rf /tmp/aws-efa-installer* /var/lib/apt/lists/*
 
+# GDRCopy userspace (libgdrapi.so) for the GPU-initiated GIN; match the host's gdrdrv version.
+# Must come before aws-ofi-nccl: its GDRCopy support is decided at configure time.
+ARG GDRCOPY_VERSION=2.5.2
+RUN git clone -q --depth 1 -b v${GDRCOPY_VERSION} https://github.com/NVIDIA/gdrcopy /tmp/gdrcopy \
+    && make -C /tmp/gdrcopy prefix=/usr/local CUDA=/usr/local/cuda lib lib_install > /dev/null \
+    && ldconfig && rm -rf /tmp/gdrcopy
+
 # aws-ofi-nccl from source: the installer's v1.21.1 drives GIN GDAKI backendVersion 0..1 only; NCCL 2.32
 # (pinned by DeepInfer) requests 2, supported since aws/aws-ofi-nccl@452f30269.
 ARG AWS_OFI_NCCL_REF=037d31185
 RUN git clone -q https://github.com/aws/aws-ofi-nccl /tmp/ofi && cd /tmp/ofi && git checkout -q ${AWS_OFI_NCCL_REF} \
     && ./autogen.sh > /dev/null \
-    && ./configure --prefix=/opt/aws-ofi-nccl-src --with-libfabric=/opt/amazon/efa --with-cuda=/usr/local/cuda --disable-tests > /dev/null \
+    && ./configure --prefix=/opt/aws-ofi-nccl-src --with-libfabric=/opt/amazon/efa --with-cuda=/usr/local/cuda --with-gdrcopy=/usr/local --disable-tests > /dev/null \
     && make -j32 > /dev/null && make install > /dev/null && rm -rf /tmp/ofi
-
-# GDRCopy userspace (libgdrapi.so) for the GPU-initiated GIN; match the host's gdrdrv version.
-ARG GDRCOPY_VERSION=2.5.2
-RUN git clone -q --depth 1 -b v${GDRCOPY_VERSION} https://github.com/NVIDIA/gdrcopy /tmp/gdrcopy \
-    && make -C /tmp/gdrcopy prefix=/usr/local CUDA=/usr/local/cuda lib lib_install > /dev/null \
-    && ldconfig && rm -rf /tmp/gdrcopy
 
 # DeepEP V2.5 with the EFA port (unordered hybrid kernels, GIN type 5, Engram without strong/VA signals on type 5)
 ARG DEEPEP_REPO=https://github.com/whn09/DeepEP
