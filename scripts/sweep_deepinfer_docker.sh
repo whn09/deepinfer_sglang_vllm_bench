@@ -7,6 +7,8 @@
 # 例（EFA GDA，privileged 下用 --device-offset 选卡）：
 #   IMAGE=deepinfer:efa DOCKER_EXTRA='--gpus all --privileged --ulimit memlock=-1 -e NCCL_GIN_TYPE=5 -e NCCL_IB_HCA=^=ibp115s0f0,ibp116s0f0' \
 #     bash scripts/sweep_deepinfer_docker.sh deepinfer-docker-efa-ep4-dspark5 4 5 sg-1k-1k --device-offset 4
+# 两个 DeepInfer 任务同时跑（host 网络）时必须用不同的 MASTER_PORT（rendezvous 端口 = MASTER_PORT - 50，默认 23333），
+# 否则后起的那个 EADDRINUSE 失败、容器还会挂住不退出：DOCKER_EXTRA='... -e MASTER_PORT=24333'
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 source "$BENCH_ROOT/scripts/scenarios.sh"

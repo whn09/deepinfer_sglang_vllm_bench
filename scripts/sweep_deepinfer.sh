@@ -4,6 +4,7 @@
 # 例：
 #   bash scripts/sweep_deepinfer.sh deepinfer-ep8-nospec 8 0 sg-1k-1k
 #   bash scripts/sweep_deepinfer.sh deepinfer-ep4-dspark5 4 5 sg-1k-1k
+# 和另一个 DeepInfer 任务并行时设不同的 MASTER_PORT（rendezvous 端口 = MASTER_PORT - 50，默认 23333）
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 source "$BENCH_ROOT/scripts/scenarios.sh"
