@@ -61,6 +61,7 @@ fi
 echo "speculative: ${SPEC[*]:-none}"
 
 GPUS="${GPUS_OVERRIDE:-$GPUS}"
+bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$GPUS" || exit 1
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
     --gpus "\"device=$GPUS\"" \

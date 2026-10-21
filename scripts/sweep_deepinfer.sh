@@ -18,6 +18,11 @@ for C in "${CONCURRENCIES[@]}"; do
     PLAN+=("$DATA_DIR/${SCN}_s${C}.jsonl@$C")
 done
 
+# 参数里的 --device-offset 决定用哪几张卡；等它们的显存释放
+OFFSET=0; PREV=""
+for a in "$@"; do [ "$PREV" = "--device-offset" ] && OFFSET="$a"; PREV="$a"; done
+bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$(seq -s, "$OFFSET" $((OFFSET + NGPU - 1)))" || exit 1
+
 cd "$DEEPINFER_ROOT"   # DeepInfer 是源码树内构建，要在仓库根目录跑
 python -u "$BENCH_ROOT/bench/run_deepinfer.py" --num-gpus "$NGPU" --nextn "$NEXTN" \
     --config "$CONFIG" --plan "${PLAN[@]}" --out "$RESULTS_DIR/results.jsonl" "$@" \

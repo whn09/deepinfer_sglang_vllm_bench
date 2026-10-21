@@ -21,6 +21,10 @@ for C in "${CONCURRENCIES[@]}"; do
     PLAN+=("/data/${SCN}_s${C}.jsonl@$C")
 done
 
+OFFSET=0; PREV=""
+for a in "$@"; do [ "$PREV" = "--device-offset" ] && OFFSET="$a"; PREV="$a"; done
+bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$(seq -s, "$OFFSET" $((OFFSET + NGPU - 1)))" || exit 1
+
 # DOCKER_EXTRA 按空白拆成参数；--gpus 的值写成 "device=0,1,2,3"（引号是 docker 要的字面量，不会被 shell 去掉）
 read -r -a EXTRA <<< "${DOCKER_EXTRA:-}"
 docker run --rm --ipc=host --network host --shm-size 32g "${EXTRA[@]}" \
