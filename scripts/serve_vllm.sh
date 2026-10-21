@@ -44,6 +44,7 @@ case "${PROFILE%-spec}" in
     tp8) GPUS=0,1,2,3,4,5,6,7; PAR=(--tensor-parallel-size 8); MAX_SEQS=256; MAX_BATCHED=16384 ;;
     *) echo "unknown profile $PROFILE" >&2; exit 1 ;;
 esac
+# 官方参考命令带 --privileged：容器能看到全部 GPU（物理编号），--gpus device=... 不起作用，选卡只能靠 CUDA_VISIBLE_DEVICES。
 # GPUS_OVERRIDE=4,5,6,7 可以把同一个档挪到别的卡上（启动阶段可以和别的任务并行；测量时 GPU 上只能有一个系统）
 SPEC=()
 if [[ "$PROFILE" == *-spec ]]; then
@@ -64,8 +65,8 @@ GPUS="${GPUS_OVERRIDE:-$GPUS}"
 bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$GPUS" || exit 1
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
-    --gpus "\"device=$GPUS\"" \
-    --privileged --ipc=host --network host \
+    --gpus all --privileged --ipc=host --network host \
+    -e CUDA_VISIBLE_DEVICES="$GPUS" \
     -v "$MODEL_DIR":/model:ro \
     -v "$HF_HOME":/root/.cache/huggingface \
     -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
