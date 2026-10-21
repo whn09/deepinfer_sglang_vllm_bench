@@ -1,57 +1,51 @@
 #!/bin/bash
-# 用 InferenceX 的 AgentX（agentx-harness）压一个已经起好的 sglang / vllm server。
-#   bash scripts/run_agentx.sh <sglang|vllm> <config名> <concurrency...>
-# 例：
-#   bash scripts/serve_sglang.sh ref
-#   bash scripts/run_agentx.sh sglang sglang-ref 8 32
+# 用 InferenceX AgentX 压一个已经起好的 server，参数照 InferenceX 的 argv builder
+# （inferencex-e2e/infx/bench/agentic/replay.py:138-167）；跑完用 InferenceX 自己的代码算指标（bench/agentx_metrics.py）。
+#   bash scripts/run_agentx.sh <sglang|vllm> <config名> <num_gpus> <topology> <concurrency>
+# 例：IX_CONC=8 bash scripts/serve_vllm.sh ix-tp4 && bash scripts/run_agentx.sh vllm vllm-ix-tp4 4 tp4 8
 #
-# 只适用于 sglang / vllm：AgentX 需要 OpenAI chat 服务端 + 跨请求 KV 前缀复用，
-# DeepInfer 开源版两样都没有（见 docs/agentx.md）。
-#
-# 每个并发点默认 profiling 3600s + 最长 1800s 预热，单点就要 1~1.5 小时。
-# AGENTX_EXTRA_ARGS 可以覆盖默认值（如 --benchmark-duration 600 做快速冒烟，但那样结果不是有效提交）。
+# InferenceX 每个并发点都单独起一次 server、只跑一遍 3600s；这里一次调用也只跑一个并发点。
+# AGENTX_DURATION（默认 3600）；低于 900s 时 harness 要求 --unsafe-override，结果不能和公开数据比。
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-BACKEND="${1:?backend}"; CONFIG="${2:?config}"; shift 2
-CONCS=("$@")
-[ "${#CONCS[@]}" -gt 0 ] || { echo "need at least one concurrency" >&2; exit 1; }
+BACKEND="${1:?backend}"; CONFIG="${2:?config}"; NGPU="${3:?num_gpus}"; TOPO="${4:?topology}"; C="${5:?concurrency}"
 case "$BACKEND" in
     sglang) URL="http://127.0.0.1:${SGLANG_PORT:-30000}" ;;
     vllm)   URL="http://127.0.0.1:${VLLM_PORT:-8000}" ;;
     *) echo "unknown backend" >&2; exit 1 ;;
 esac
 
-# 钉日期版本的语料，保证可复现、能和 InferenceX 公布的数字对上
 DATASET="${AGENTX_DATASET:-semianalysis_cc_traces_weka_062126}"
-VERSION="${AGENTX_VERSION:-1.0.7}"
+VERSION="${AGENTX_VERSION:-1.0.12}"           # InferenceX: infx/bench/agentic/requirements.txt
+DURATION="${AGENTX_DURATION:-3600}"            # InferenceX: DEFAULT_AGENTIC_DURATION_SECONDS
+INFERENCEX_E2E="${INFERENCEX_E2E:-$WORK/inferencex-e2e}"
 
-# agentx-harness 带的是 fork 版 aiperf，必须装在独立 venv 里，别和别的环境混
-VENV="$WORK/agentx-venv"
+# agentx-harness 带的是 fork 版 aiperf，必须装在独立 venv 里；InferenceX 用 Python 3.11–3.13 皆可
+VENV="$WORK/agentx-venv-$VERSION"
 if [ ! -x "$VENV/bin/agentx" ]; then
     python3 -m venv "$VENV"
-    "$VENV/bin/pip" install -q "agentx-harness==$VERSION"
+    "$VENV/bin/pip" install -q "agentx-harness==$VERSION" "datasets>=4.7.0"
 fi
 
-for C in "${CONCS[@]}"; do
-    OUT="$RESULTS_DIR/agentx/$CONFIG/c$C"
-    mkdir -p "$OUT"
-    "$VENV/bin/agentx" profile \
-        --url "$URL" --endpoint /v1/chat/completions \
-        --model "$SERVED_MODEL_NAME" --tokenizer "$MODEL_DIR" \
-        --tokenizer-trust-remote-code \
-        --concurrency "$C" \
-        --public-dataset "$DATASET" \
-        --output-artifact-dir "$OUT" \
-        --ui simple \
-        ${AGENTX_EXTRA_ARGS:-} \
-        2>&1 | tee "$OUT/agentx.log"
-    python3 - "$OUT" <<'EOF'
-import json, sys, pathlib
-p = next(pathlib.Path(sys.argv[1]).rglob("profile_export_aiperf.json"), None)
-if p is None:
-    print("no profile_export_aiperf.json found"); sys.exit(0)
-d = json.loads(p.read_text())
-print(f"{p}: submission_valid={d.get('submission_valid')}")
-EOF
-done
+EXTRA=()
+[ "$DURATION" -lt 900 ] && EXTRA+=(--unsafe-override)
+OUT="$RESULTS_DIR/agentx/$CONFIG/c$C"
+mkdir -p "$OUT"
+export AIPERF_FAILED_REQUEST_THRESHOLD=0.10     # InferenceX workflow env
+"$VENV/bin/agentx" profile \
+    --url "$URL" \
+    --model "$SERVED_MODEL_NAME" --tokenizer "$MODEL_DIR" \
+    --concurrency "$C" --benchmark-duration "$DURATION" \
+    --tokenizer-trust-remote-code \
+    --server-metrics "$URL/metrics" \
+    --output-artifact-dir "$OUT/aiperf_artifacts" \
+    --public-dataset "$DATASET" \
+    --ui simple \
+    "${EXTRA[@]}" ${AGENTX_EXTRA_ARGS:-} \
+    2>&1 | tee "$OUT/agentx.log"
+
+INFERENCEX_E2E="$INFERENCEX_E2E" python3 "$BENCH_ROOT/bench/agentx_metrics.py" "$OUT/aiperf_artifacts" \
+    --num-gpus "$NGPU" --conc "$C" --topology "$TOPO" \
+    --published "$BENCH_ROOT/results/inferencex_public/dsv41flash_b200_${BACKEND}_agentic.json" \
+    --out "$OUT/metrics.json" 2>&1 | tee "$OUT/compare.txt"

@@ -46,11 +46,24 @@ case "${PROFILE%-spec}" in
           ENGRAM_CFG='{"cpu_offload":true,"embedding_across_dp":true}' ;;
     tp8) GPUS=0,1,2,3,4,5,6,7; PAR=(--tensor-parallel-size 8); MAX_SEQS=256; MAX_BATCHED=16384 ;;
     # InferenceX AgentX recipe（dsv41flash/vllm/b200-fp4-mtp/agentic.yaml 的 base + zip_override_tp4），给 #4 用。
-    # 投机解码固定按 recipe（block rejection、adaptive verification 关），吞吐测试用 golden 合成接受长度
+    # 每个并发点一套参数（InferenceX 每个点都重新起 server），用 IX_CONC 选：c=1/4 用 4096 batched + 捕获到 4092，
+    # c=8 起 8192 + 捕获到 8190，c>=16 再加 decoder_replay 捕获尺寸；max-num-seqs = 8,8,16,32,64,128,256。
+    # 投机解码按 recipe（block rejection、adaptive verification 关），吞吐用 golden 合成接受长度
     # （IX_SYNTHETIC_AL，默认 3.51 = DSpark 5 thinking on；设 0 用真实验证）。不需要再加 -spec 后缀。
-    ix-tp4) GPUS=0,1,2,3;      PAR=(--tensor-parallel-size 4); MAX_SEQS=256; MAX_BATCHED=8192
-          COMPILE_CFG='{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092,6144,8190]}'
-          CAPTURE=8190
+    ix-tp4) GPUS=0,1,2,3;      PAR=(--tensor-parallel-size 4)
+          C="${IX_CONC:?ix-tp4 needs IX_CONC (1/4/8/16/32/64/128)}"
+          SMALL='[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]'
+          BIG='[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092,6144,8190]'
+          REPLAY='[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048,2304,2560,2816,3072,3328,3584,3840,4096]'
+          case "$C" in
+              1|4) MAX_SEQS=8;  MAX_BATCHED=4096; CAPTURE=4092
+                   COMPILE_CFG='{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":'"$SMALL"'}' ;;
+              8)   MAX_SEQS=16; MAX_BATCHED=8192; CAPTURE=8190
+                   COMPILE_CFG='{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":'"$BIG"'}' ;;
+              16|32|64|128) MAX_SEQS=$((C * 2)); MAX_BATCHED=8192; CAPTURE=8190
+                   COMPILE_CFG='{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":'"$BIG"',"decoder_replay_cudagraph_capture_sizes":'"$REPLAY"'}' ;;
+              *) echo "IX_CONC=$C not in the InferenceX TP4 search space" >&2; exit 1 ;;
+          esac
           IX_ARGS=(--language-model-only --max-model-len 1048576 --disable-uvicorn-access-log) ;;
     *) echo "unknown profile $PROFILE" >&2; exit 1 ;;
 esac
@@ -82,6 +95,11 @@ GPUS="${GPUS_OVERRIDE:-$GPUS}"
 # 两个 vLLM 同时跑时 DP 的 RPC 端口也要错开（默认 29550）
 DP_PORT_ARGS=()
 [[ " ${PAR[*]} " == *" --data-parallel-size "* ]] && DP_PORT_ARGS=(--data-parallel-rpc-port $((29550 + (PORT - 8000) * 100)))
+if [ "${DRY_RUN:-0}" = 1 ]; then
+    printf 'profile=%s gpus=%s par=%s max_num_seqs=%s max_batched=%s capture=%s\nspec=%s\nix_args=%s\ncompile=%s\nkernel=%s engram=%s\n' \
+        "$PROFILE" "$GPUS" "${PAR[*]}" "$MAX_SEQS" "$MAX_BATCHED" "$CAPTURE" "${SPEC[*]:-none}" "${IX_ARGS[*]:-}" "$COMPILE_CFG" "$KERNEL_CFG" "$ENGRAM_CFG"
+    exit 0
+fi
 bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$GPUS" || exit 1
 # 持久化容器里的 /root/.cache（torch.compile / FlashInfer autotune / JIT 结果），同一栈再次启动时复用，省掉十几到三十几分钟
 mkdir -p "$WORK/cache/vllm"
@@ -93,6 +111,7 @@ docker run -d --name "$NAME" \
     -v "$WORK/cache/vllm":/root/.cache \
     -v "$HF_HOME":/root/.cache/huggingface \
     -e VLLM_USE_V2_MODEL_RUNNER=1 \
+    -e VLLM_USE_RUST_FRONTEND=1 \
     -e VLLM_ENGINE_READY_TIMEOUT_S=7200 \
     "$IMAGE" /model \
         --served-model-name "$SERVED_MODEL_NAME" \
