@@ -36,7 +36,9 @@ case "$BASE" in
     tp4)         GPUS=0,1,2,3;         PAR=(--tp 4 --ep-size 4); GRAPH_BS=256 ;;
     # InferenceX c=1-8：纯 TP、不开 EP
     # 不开 EP 时每卡权重更多，0.8 放不下 KV（报 minimum viable 0.833）；InferenceX 这里用 0.88
-    tp4-ep1)     GPUS=0,1,2,3;         PAR=(--tp 4);             GRAPH_BS=256; MEM=0.88 ;;
+    # InferenceX 只在 c=1-8 用它：max-running-requests 1-16、swa-prefix-tails 128；按 256 并发留 SWA 池会挤掉 KV
+    tp4-ep1)     GPUS=0,1,2,3;         PAR=(--tp 4);             GRAPH_BS=16;  MEM=0.88
+                 EXTRA=(--max-running-requests 16 --swa-prefix-tails 128) ;;
     # InferenceX c=48-256：DP attention + EP4 + MegaMoE；cuda graph bs 按每个 DP rank 计
     dpa4)        GPUS=0,1,2,3;         PAR=("${DPA4[@]}");       GRAPH_BS=64
                  EXTRA=(--moe-a2a-backend megamoe --moe-runner-backend flashinfer_mxfp4) ;;
