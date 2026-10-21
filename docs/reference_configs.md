@@ -77,23 +77,25 @@ The vLLM reference (2 GPUs, max-num-seqs 8) is clearly latency-oriented: beyond 
 
 ## Config names in this repo
 
-| Config | Command | GPUs |
-|---|---|---|
-| `sglang-ref` | `serve_sglang.sh ref` | 0-3 |
-| `sglang-ref-nospec` | `serve_sglang.sh ref-nospec` | 0-3 |
-| `sglang-tp4` | `serve_sglang.sh tp4` | 0-3 |
-| `sglang-tp4-nospec` | `serve_sglang.sh tp4-nospec` | 0-3 |
-| `sglang-tp8` | `serve_sglang.sh tp8` | 0-7 |
-| `sglang-tp8-nospec` | `serve_sglang.sh tp8-nospec` | 0-7 |
-| `vllm-ref` | `serve_vllm.sh ref` | 0-1 |
-| `vllm-ref-spec` | `serve_vllm.sh ref-spec` | 0-1 |
-| `vllm-tp4` | `serve_vllm.sh tp4` | 0-3 |
-| `vllm-tp4-spec` | `serve_vllm.sh tp4-spec` | 0-3 |
-| `vllm-tp8` | `serve_vllm.sh tp8` | 0-7 |
-| `vllm-tp8-spec` | `serve_vllm.sh tp8-spec` | 0-7 |
-| `deepinfer-ep8-nospec` | `sweep_deepinfer.sh deepinfer-ep8-nospec 8 0 <scenario>` | 0-7 |
-| `deepinfer-ep8-dspark5` | `sweep_deepinfer.sh deepinfer-ep8-dspark5 8 5 <scenario>` | 0-7 |
-| `deepinfer-ep4-nospec` / `-dspark5` | `sweep_deepinfer.sh ... 4 ...` | 0-3 |
+Server profiles take a suffix: SGLang `-nospec` turns DSpark off, vLLM `-spec` turns it on. Per-concurrency topologies follow InferenceX's B200 recipes (#14).
+
+| Config | Command | Topology | GPUs |
+|---|---|---|---|
+| `sglang-ref` | `serve_sglang.sh ref` | TP4/EP4, CUDA graph bs ≤ 64 (official reference) | 0-3 |
+| `sglang-tp4` | `serve_sglang.sh tp4` | TP4/EP4 | 0-3 |
+| `sglang-tp4-ep1` | `serve_sglang.sh tp4-ep1` | TP4, no EP | 0-3 |
+| `sglang-dpa4` | `serve_sglang.sh dpa4` | TP4 + DP4 + EP4, DP attention, MegaMoE | 0-3 |
+| `sglang-dpa4-deepep` | `serve_sglang.sh dpa4-deepep` | as `dpa4`, DeepEP a2a (Tier C) | 0-3 |
+| `sglang-tp8` | `serve_sglang.sh tp8` | TP8/EP8 | 0-7 |
+| `vllm-ref` | `serve_vllm.sh ref` | TP2, max-num-seqs 8 (official reference) | 0-1 |
+| `vllm-tp4` | `serve_vllm.sh tp4` | TP4 | 0-3 |
+| `vllm-dep4` | `serve_vllm.sh dep4` | TP1 × DP4 + EP, MegaMoE | 0-3 |
+| `vllm-dep4-deepep` | `serve_vllm.sh dep4-deepep` | as `dep4`, DeepEP a2a (Tier C) | 0-3 |
+| `vllm-tp8` | `serve_vllm.sh tp8` | TP8 | 0-7 |
+| `deepinfer-ep4-{nospec,dspark5}` | `sweep_deepinfer.sh ... 4 ...` | attention DP + MoE EP4 (DeepEP) | 0-3 |
+| `deepinfer-ep8-{nospec,dspark5}` | `sweep_deepinfer.sh ... 8 ...` | attention DP + MoE EP8 | 0-7 |
+
+`GPUS_OVERRIDE=4,5,6,7` (servers) / `--device-offset 4` (DeepInfer) move a 4-GPU config to the other half of the box.
 
 The scripts differ from the official commands in four ways only: the image is the pinned latest release, the model is mounted from a local directory (no HF download), `--served-model-name` gives all three the same model name, and SGLang adds `--enable-metrics` so speculative counters can be scraped.
 
@@ -137,7 +139,9 @@ vLLM 参考配置（2 卡、max-num-seqs 8）明显是低延迟取向，并发�
 
 ## 本仓库各配置名
 
-见上方英文部分的表格。
+server 的档可以加后缀：SGLang 加 `-nospec` 关闭 DSpark，vLLM 加 `-spec` 打开 DSpark。按并发区间选拓扑的做法参照 InferenceX 的 B200 recipe（#14）。配置表见上方英文部分。
+
+`GPUS_OVERRIDE=4,5,6,7`（server）/ `--device-offset 4`（DeepInfer）可以把 4 卡配置挪到机器的另一半卡上。
 
 本仓库脚本和官方命令只有四处差别：镜像用钉了版本号的最新正式版；模型从本地目录挂进容器（不走 HF 下载）；加 `--served-model-name` 让三家报同一个模型名；SGLang 加 `--enable-metrics` 以便抓投机解码计数器。
 
