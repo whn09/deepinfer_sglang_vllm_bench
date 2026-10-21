@@ -13,9 +13,12 @@ BACKEND="${1:?backend}"; CONFIG="${2:?config}"; NGPU="${3:?num_gpus}"; TOPO="${4
 case "$BACKEND" in
     sglang) URL="http://127.0.0.1:${SGLANG_PORT:-30000}" ;;
     vllm)   URL="http://127.0.0.1:${VLLM_PORT:-8000}" ;;
+    deepinfer) URL="http://127.0.0.1:${DEEPINFER_PORT:-8888}" ;;
     *) echo "unknown backend" >&2; exit 1 ;;
 esac
 METRICS_URL="$URL/metrics"
+# DeepInfer 的 server（deepseek-ai/DeepInfer#147）故意不在 /metrics 暴露指标（放在 /deepinfer/metrics），不让 aiperf 抓
+METRICS_ARGS=(--server-metrics "$METRICS_URL"); [ "$BACKEND" = deepinfer ] && METRICS_ARGS=()
 # serve_ix.sh 起的配置：AgentX 连 recipe 要求的 frontend（router），server 的 /metrics 仍然直接抓 server；
 # recipe 的 benchmark.env 里客户端相关的设置照 InferenceX replay.py 的方式应用
 IX_FLAGS=()
@@ -53,7 +56,7 @@ export AIPERF_FAILED_REQUEST_THRESHOLD=0.10     # InferenceX workflow env
     --model "$SERVED_MODEL_NAME" --tokenizer "$MODEL_DIR" \
     --concurrency "$C" --benchmark-duration "$DURATION" \
     --tokenizer-trust-remote-code \
-    --server-metrics "$METRICS_URL" \
+    "${METRICS_ARGS[@]}" \
     --output-artifact-dir "$OUT/aiperf_artifacts" \
     --public-dataset "$DATASET" \
     --ui simple \
@@ -62,5 +65,5 @@ export AIPERF_FAILED_REQUEST_THRESHOLD=0.10     # InferenceX workflow env
 
 INFERENCEX_E2E="$INFERENCEX_E2E" python3 "$BENCH_ROOT/bench/agentx_metrics.py" "$OUT/aiperf_artifacts" \
     --num-gpus "$NGPU" --conc "$C" --topology "$TOPO" \
-    --published "$BENCH_ROOT/results/inferencex_public/dsv41flash_b200_${BACKEND}_agentic.json" \
+    --published "$BENCH_ROOT/results/inferencex_public/dsv41flash_b200_${PUBLISHED_AS:-$BACKEND}_agentic.json" \
     --out "$OUT/metrics.json" 2>&1 | tee "$OUT/compare.txt"
