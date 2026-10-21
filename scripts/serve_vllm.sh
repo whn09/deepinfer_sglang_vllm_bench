@@ -36,8 +36,9 @@ case "${PROFILE%-spec}" in
           MAX_SEQS=64;  MAX_BATCHED=8192
           KERNEL_CFG='{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe"}'
           ENGRAM_CFG='{"cpu_offload":true,"embedding_across_dp":true}' ;;
-    # C 层消融：和 DeepInfer 同样的策略（DP attention + EP + DeepEP）。deepep_v2 要 NCCL GIN，先用 V1 节点内路径
-    dep4-deepep) GPUS=0,1,2,3; PAR=(--tensor-parallel-size 1 --data-parallel-size 4 --enable-expert-parallel --all2all-backend deepep_high_throughput)
+    # C 层消融：和 DeepInfer 同样的策略（DP attention + EP + DeepEP）。deepep_v2 要 NCCL GIN，先用 V1 节点内路径；
+    # deepep_high_throughput 捕获 CUDA graph 时报 cudaErrorStreamCaptureUnjoined，decode 用 low_latency
+    dep4-deepep) GPUS=0,1,2,3; PAR=(--tensor-parallel-size 1 --data-parallel-size 4 --enable-expert-parallel --all2all-backend deepep_low_latency)
           MAX_SEQS=64;  MAX_BATCHED=8192
           ENGRAM_CFG='{"cpu_offload":true,"embedding_across_dp":true}' ;;
     tp8) GPUS=0,1,2,3,4,5,6,7; PAR=(--tensor-parallel-size 8); MAX_SEQS=256; MAX_BATCHED=16384 ;;
