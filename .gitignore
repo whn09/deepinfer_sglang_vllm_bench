@@ -3,3 +3,4 @@ __pycache__/
 data/
 .tmp_*/
 results/*/records/
+results/b200_live/
