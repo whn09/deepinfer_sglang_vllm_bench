@@ -62,7 +62,15 @@ Per-GPU throughput still moves with parallel size (larger EP means fewer experts
 
 - **Tier C — same parallel strategy (ablation)**: SGLang and vLLM also run DeepInfer's strategy, attention DP + MoE EP + DeepEP (both release images ship a DeepEP build). It splits a gap into "parallel strategy" vs "implementation of the same strategy". Tiers A/B keep each stack's recommended config: DeepEP is intrinsic to DeepInfer's design, while InferenceX's own B200 recipes do not use DeepEP either (SGLang `moe-a2a-backend: none`, vLLM DEP with MegaMoE), and forcing one stack's internals onto another is not "fairer".
 
-### 2.4 Differences to record but not force
+### 2.4 Scheduling knobs trade TTFT for decode throughput: always report TTFT
+
+DeepInfer's `DEEPINFER_PREFILL_ANY_ATTEMPT_INTERVAL` (engine default 100) admits a waiting prompt on an otherwise idle rank only every N decode steps. Measured on 4 GPUs, DSpark 5, `sg-1k-1k`: interval 100 vs 2 gives c=128 3003 vs 2658 tok/s/GPU and TPOT 7.6 vs 10.3 ms, but TTFT 1491 vs 172 ms (c=1: 552 vs 73 ms). Any engine can buy decode throughput with TTFT this way (SGLang's `--prefill-decode-interval`, vLLM's chunked-prefill budget play the same role), so:
+
+- Every comparison table carries TTFT next to throughput and TPOT.
+- The headline comparison is at matched TTFT (or under a TTFT SLO), not at matched concurrency alone.
+- `bench/run_deepinfer.py` defaults to `--prefill-any-interval 2` (serving-like) and records it in `engine_args`; interval 100 is kept as a reference point.
+
+### 2.5 Differences to record but not force
 
 These are part of each implementation; do not force them equal, but state them next to the results:
 
@@ -71,7 +79,7 @@ These are part of each implementation; do not force them equal, but state them n
 - **HTTP overhead**: SGLang/vLLM go through HTTP + streaming + detokenization; DeepInfer runs in-process. Negligible at high concurrency; at c=1 it slightly favours DeepInfer's TTFT/TPOT.
 - **EPLB**: off by default in DeepInfer (`--enable-eplb` turns it on); neither SGLang nor vLLM enables EPLB in the aligned configs.
 
-### 2.5 Beyond speed: check output quality first
+### 2.6 Beyond speed: check output quality first
 
 A speed comparison only means something if output quality is equivalent. At minimum spot-check outputs for the same prompts (no garbage, no repetition loops); better, run a small eval set (e.g. a GSM8K subset). DeepInfer's own evals: `eval/README.md` in its repo.
 
@@ -170,7 +178,15 @@ Rules for this repo:
 
 - **C 层：相同并行策略（消融）**：让 SGLang 和 vLLM 也用 DeepInfer 的并行策略，即 attention DP + MoE EP + DeepEP（两家的正式版镜像里都带了 DeepEP）。用来把差距拆成"并行策略不同"和"同样策略下实现的快慢"两部分。A/B 层仍然用各家推荐的配置：DeepEP 是 DeepInfer 设计里固有的一部分，而 InferenceX 自己的 B200 recipe 也没有用 DeepEP（SGLang 用 `moe-a2a-backend: none`，vLLM DEP 用 MegaMoE）；把一家的内部实现强加给另一家，并不会更公平。
 
-### 2.4 必须记录、但不强行对齐的差异
+### 2.4 调度参数会拿 TTFT 换 decode 吞吐：必须报告 TTFT
+
+DeepInfer 的 `DEEPINFER_PREFILL_ANY_ATTEMPT_INTERVAL`（引擎默认 100）在其他 rank 空闲时，每 N 个 decode step 才接纳一次等待中的 prompt。4 卡、DSpark 5、`sg-1k-1k` 实测：interval 100 对 2，c=128 时每卡 3003 对 2658 tok/s，TPOT 7.6 对 10.3ms，但 TTFT 是 1491 对 172ms（c=1 时 552 对 73ms）。任何引擎都可以这样拿 TTFT 换 decode 吞吐（SGLang 的 `--prefill-decode-interval`、vLLM 的 chunked prefill 预算起同样的作用），所以：
+
+- 每张对比表都要在吞吐和 TPOT 旁边带上 TTFT。
+- 主结论要在 TTFT 相当（或满足 TTFT SLO）的条件下给出，不能只按相同并发比。
+- `bench/run_deepinfer.py` 默认 `--prefill-any-interval 2`（接近服务端行为），并记录在 `engine_args` 里；interval 100 保留作参考点。
+
+### 2.5 必须记录、但不强行对齐的差异
 
 这些属于各家实现的一部分，不强行对齐，但要写在结果旁边：
 
@@ -179,7 +195,7 @@ Rules for this repo:
 - **HTTP 开销**：SGLang/vLLM 走 HTTP + 流式 + 反 tokenize，DeepInfer 是进程内运行。大并发下可以忽略；c=1 时会让 DeepInfer 的 TTFT/TPOT 略占便宜。
 - **EPLB**：DeepInfer 默认不开（`--enable-eplb` 可开），对齐配置里 SGLang/vLLM 都没开 EPLB。
 
-### 2.5 速度之外：先确认输出质量等价
+### 2.6 速度之外：先确认输出质量等价
 
 只有输出质量相当，速度对比才有意义。至少抽查同一批 prompt 的输出（不乱码、不重复循环）；最好跑一个小评测集（如 GSM8K 子集）。DeepInfer 自己的评测见它仓库里的 `eval/README.md`。
 

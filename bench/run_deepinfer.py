@@ -59,6 +59,14 @@ p.add_argument("--max-model-len", type=int, default=None, help="默认按数据�
 p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
 p.add_argument("--sampler-force-topk", type=int, default=4096)
 p.add_argument("--enable-eplb", action="store_true", help="开 EPLB（专家重排 + 冗余专家）；参考配置的 sglang/vllm 都没开")
+p.add_argument(
+    "--prefill-any-interval",
+    type=int,
+    default=2,
+    help="DEEPINFER_PREFILL_ANY_ATTEMPT_INTERVAL：其他 rank 空闲时每隔多少个 decode step 接纳一次等待中的 prompt。"
+    "引擎默认 100 会给每个请求加一个 ~0.5-1.5s 的 TTFT 下限（以 decode 吞吐换 TTFT）；对齐服务端行为用 2，"
+    "见 deepseek-ai/DeepInfer#147 和本仓库 #6",
+)
 p.add_argument("--log-interval", type=int, default=50, help="引擎日志间隔（step），日志里有 avg_nextn_accept_rate（引擎自报的投机接受率）；0 关闭")
 p.add_argument("--note", default="")
 args = p.parse_args()
@@ -103,6 +111,7 @@ def max_model_len_for_plan() -> int:
 
 def rank_main(dp_size: int, dp_rank: int) -> None:
     os.environ["DEEPINFER_USE_NEXTN_DECODE"] = str(args.nextn)
+    os.environ["DEEPINFER_PREFILL_ANY_ATTEMPT_INTERVAL"] = str(args.prefill_any_interval)
     os.environ["DEVICE_OFFSET"] = str(args.device_offset)
 
     from _config import create_llm, setup_common_env
@@ -252,6 +261,7 @@ def merge_and_report() -> None:
                 "gpu_memory_utilization": args.gpu_memory_utilization,
                 "enable_eplb": args.enable_eplb,
                 "sampler_force_topk": args.sampler_force_topk,
+                "prefill_any_interval": args.prefill_any_interval,
             },
             "note": args.note,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
