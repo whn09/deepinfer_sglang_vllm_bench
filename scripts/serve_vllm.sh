@@ -20,7 +20,8 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
 PROFILE="${1:?usage: serve_vllm.sh <ref|ref-spec|tp8|tp8-spec>}"
-IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
+# 优先用最新正式发行版（钉版本号，不用 latest）
+IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.32.0}"
 PORT="${VLLM_PORT:-8000}"
 NAME=bench-vllm
 

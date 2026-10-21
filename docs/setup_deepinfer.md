@@ -1,3 +1,206 @@
+# Building DeepInfer and downloading the model on B200
+
+Exact steps to build DeepInfer from scratch on an AWS B200 box (DLAMI, `/opt/pytorch` venv) and download the `DeepSeek-V4.1-Flash-1017` weights, plus the pitfall behind each step. Verified on 2026-10-21.
+
+## 1. Environment
+
+| Item | Value |
+|---|---|
+| GPU | NVIDIA B200 (SM100) |
+| Driver | 595.91.07, **supports up to CUDA 13.2** |
+| Python | DLAMI's `/opt/pytorch` venv (Python 3.13) |
+| PyTorch | 2.13.0+cu132 (installed by `requirements-nvidia.txt`) |
+| CUDA toolchain | pip-installed `nvidia/cu13` inside the venv; **no** `/usr/local/cuda` |
+| Code | `~/DeepInfer` |
+| Data disk | `/opt/dlami/nvme` (28T) |
+
+> The README asks for Python 3.12; 3.13 builds and imports fine.
+
+**Root cause of the build errors:** the venv's CUDA compiler toolchain (nvcc / cicc …) is 13.0, while torch cu132 pulls the CUDA runtime and headers up to 13.2. With mismatched versions, CUDA kernel compilation fails one way after another, so the toolchain must be aligned to 13.2 before building.
+
+## 2. One-time setup (once per new host)
+
+### 2.1 Align the CUDA toolchain to 13.2
+
+```bash
+source /opt/pytorch/bin/activate
+
+pip install --no-deps \
+    nvidia-cuda-nvcc==13.2.78 \
+    nvidia-cuda-crt==13.2.78 \
+    nvidia-cuda-cccl==13.2.75 \
+    nvidia-nvvm==13.2.78 \
+    nvidia-cuda-cuobjdump==13.2.78
+```
+
+Why each package:
+
+| Package | Error when missing / misaligned |
+|---|---|
+| `nvidia-cuda-nvcc`, `nvidia-cuda-crt` | `CUDA compiler and CUDA toolkit headers are incompatible` (nvcc 13.0 meets 13.2 headers) |
+| `nvidia-cuda-cccl` | same; cccl headers must match nvcc |
+| `nvidia-nvvm` | `macro '__cudaLaunch' passed 2 arguments, but takes just 1` (CUDA 13 moved cicc into a separate nvvm package — easy to miss) |
+| `nvidia-cuda-cuobjdump` | `error: cuobjdump not found` (DeepSelect / FlashMLA check register spills with it after building; not installed in the venv by default) |
+
+Check afterwards:
+
+```bash
+/opt/pytorch/cuda/bin/nvcc --version | tail -2   # release 13.2, V13.2.78
+pip list | grep -iE "nvidia-(cuda-(nvcc|crt|cccl|runtime|cuobjdump)|nvvm)"   # all 13.2.x
+```
+
+> It must be 13.2 — not 13.3 / 13.4: the driver supports at most 13.2 and torch is cu132.
+
+### 2.2 System dependency
+
+```bash
+sudo apt-get install -y libdw-dev
+```
+
+DeepEP's deep_jit needs `elfutils/libdwfl.h`; without it the build fails with `fatal error: elfutils/libdwfl.h: No such file or directory`.
+
+## 3. Build
+
+### 3.1 Environment variables
+
+Run this in every new shell before building or running (the host is not fixed; copy it as-is to a new host — it does not depend on any file pre-placed on the machine). This repo's `scripts/env.sh` contains it plus the benchmark paths:
+
+```bash
+source /opt/pytorch/bin/activate
+
+export CUDA_HOME=/opt/pytorch/lib/python3.13/site-packages/nvidia/cu13
+export PATH=$CUDA_HOME/bin:$PATH
+export CPLUS_INCLUDE_PATH=$CUDA_HOME/include:$CUDA_HOME/include/cccl:$CPLUS_INCLUDE_PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib:$LD_LIBRARY_PATH
+export LIBRARY_PATH=$CUDA_HOME/lib:$LIBRARY_PATH
+
+export DEEPINFER_ACCELERATOR=nvidia
+export FLASH_MLA_SKIP_REG_SPILL_CHECK=1
+
+hash -r   # drop the shell's cached command paths so hf/python resolve to the venv
+```
+
+Two settings differ from the official README:
+
+- **`$CUDA_HOME/include/cccl` added to `CPLUS_INCLUDE_PATH`.**
+  The FlashMLA and DeepSelect `setup.py` look for cccl at `$CUDA_HOME/targets/x86_64-linux/include/cccl`, the standard toolkit layout. The pip layout has no `targets/`; cccl is at `$CUDA_HOME/include/cccl`. nvcc adds that path itself via `nvcc.profile` when compiling `.cu`, but g++ compiling `.cpp` does not, hence `fatal error: cuda/std/utility: No such file or directory`.
+
+- **`FLASH_MLA_SKIP_REG_SPILL_CHECK=1`.**
+  After building, FlashMLA fails the build if any kernel spills registers. With CUDA 13.2's ptxas, two template instances of the sm100 head64 FP8 sparse decode kernel use 16 bytes of stack each (`STACK:16 LOCAL:0`); every other kernel is spill-free. FlashMLA's README says they tuned it to zero spills on CUDA 13.3, but this driver supports only 13.2, so the check has to be skipped.
+  As far as we can tell this does not affect results, only possibly makes that decode kernel slightly slower — not measured yet. Keep it in mind if that kernel is compared with official numbers.
+
+### 3.2 Build
+
+```bash
+cd ~/DeepInfer
+# run the 3.1 environment first
+./build.sh 2>&1 | tee /tmp/di_build.log
+```
+
+`build.sh` does, in order:
+
+1. `pip install -r requirements-nvidia.txt` (torch 2.13.0+cu132, huggingface_hub 0.36.2, …)
+2. swaps NCCL to 2.32.3
+3. `scripts/build_vendor.sh`: builds the vendored dependencies — DeepSelect → FlashMLA → DeepEP, …
+4. `scripts/build.sh build`: builds DeepInfer's own `_C`
+
+On success the last line is:
+
+```
+✅ DeepInfer is successfully built
+```
+
+### 3.3 Verify
+
+```bash
+cd ~/DeepInfer      # deepinfer is built in-tree, not installed into site-packages: run from the repo root
+python -c "import torch, deepinfer, deepinfer._C, deep_select, flash_mla, deep_ep; \
+print('OK', torch.__version__, torch.cuda.get_device_name(0))"
+# expected: OK 2.13.0+cu132 NVIDIA B200
+```
+
+> From any other directory this raises `ModuleNotFoundError: No module named 'deepinfer'`. That is expected — `cd ~/DeepInfer` first (`deep_select` / `flash_mla` / `deep_ep` are installed into the venv and import from anywhere).
+
+## 4. Download the model
+
+### 4.1 The right command
+
+```bash
+# run the 3.1 environment first (key point: use the venv's hf)
+export HF_HOME=/opt/dlami/nvme/hf
+# export HF_TOKEN=hf_xxx           # optional: higher rate limits, faster downloads
+
+which hf                           # must be /opt/pytorch/bin/hf, not /usr/bin/hf
+
+nohup hf download deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+    --local-dir /opt/dlami/nvme/models/DeepSeek-V4.1-Flash-1017 \
+    > /tmp/hf_dl.log 2>&1 &
+
+tail -f /tmp/hf_dl.log
+```
+
+- About **476G** in 48 safetensors — put it on `/opt/dlami/nvme`; the root partition is too small.
+- `nohup` keeps it running if SSH drops.
+- If it stops midway, rerun the same command; completed files are skipped.
+
+### 4.2 Why the first attempt failed
+
+The error:
+
+```
+ValueError: The file is too large to be downloaded using the regular download method. Install `hf_xet` ...
+```
+
+The shell picked up the **system `/usr/bin/hf`**: system Python 3.14, huggingface_hub 1.2.2, **no `hf_xet`**. The model repo uses Xet storage; without hf_xet the client falls back to plain HTTP, which refuses files this large.
+
+The venv's `/opt/pytorch/bin/hf` ships `hf-xet 1.7.0` and works, but it only appears once `build.sh` installs the requirements. If the shell ran `hf` before that, bash keeps using the cached `/usr/bin/hf`. Run `hash -r` once or call `/opt/pytorch/bin/hf` by full path.
+
+> Do not `pip install hf_xet` into the system Python: Ubuntu protects it (PEP 668), and it is not needed.
+
+### 4.3 Check the download is complete
+
+```bash
+D=/opt/dlami/nvme/models/DeepSeek-V4.1-Flash-1017
+ls $D/*.safetensors | wc -l                                     # 48
+ls $D/.cache/huggingface/download | grep -c incomplete          # 0
+du -sh $D                                                        # ~476G
+```
+
+> While downloading, `du` can show far more than the real progress (hf_xet preallocates); trust the log and the `incomplete` count.
+
+### 4.4 Use the local copy
+
+DeepInfer downloads the model into the HF cache on first run by default. To use the local copy:
+
+```bash
+cd ~/DeepInfer
+# run the 3.1 environment first
+export DEEPINFER_HF_MODEL_DIR=/opt/dlami/nvme/models/DeepSeek-V4.1-Flash-1017
+python examples/offline_inference.py
+```
+
+## 5. Error quick reference
+
+| Error | Cause | Fix |
+|---|---|---|
+| `CUDA compiler and CUDA toolkit headers are incompatible` | nvcc 13.0 vs 13.2 headers | 2.1: align nvcc / crt / cccl |
+| `macro '__cudaLaunch' passed 2 arguments, but takes just 1` | cicc (nvvm package) still 13.0 | 2.1: `nvidia-nvvm==13.2.78` |
+| `error: cuobjdump not found` | cuobjdump not in the venv | 2.1: `nvidia-cuda-cuobjdump==13.2.78` |
+| `fatal error: cuda/std/utility: No such file or directory` | g++ cannot find cccl in the pip layout | 3.1: add `$CUDA_HOME/include/cccl` to `CPLUS_INCLUDE_PATH` |
+| `Register spilling detected. Build failed!` (FlashMLA) | CUDA 13.2 ptxas emits 16 bytes of stack | 3.1: `FLASH_MLA_SKIP_REG_SPILL_CHECK=1` |
+| `fatal error: elfutils/libdwfl.h: No such file or directory` | missing system header | 2.2: `sudo apt-get install -y libdw-dev` |
+| `The file is too large to be downloaded using the regular download method` | `/usr/bin/hf` without hf_xet | 4.1: `hash -r`, use `/opt/pytorch/bin/hf` |
+| `ModuleNotFoundError: No module named 'deepinfer'` | not run from the repo root | `cd ~/DeepInfer` |
+| `Usage: DEEPINFER_ACCELERATOR=nvidia\|ascend` | accelerator not set | `export DEEPINFER_ACCELERATOR=nvidia` |
+
+To locate a build error, find the first failure in the log:
+
+```bash
+grep -n -E "error|FAILED|not found" /tmp/di_build.log | head
+```
+
+<details><summary>中文</summary>
+
 # DeepInfer 在 B200 上的编译与模型下载指南
 
 本文记录在 AWS B200 机器（DLAMI，`/opt/pytorch` venv）上从零编译 DeepInfer、下载 `DeepSeek-V4.1-Flash-1017` 权重的正确步骤，以及每一步背后踩过的坑。2026-10-21 实测通过。
@@ -198,3 +401,5 @@ python examples/offline_inference.py
 ```bash
 grep -n -E "error|FAILED|not found" /tmp/di_build.log | head
 ```
+
+</details>

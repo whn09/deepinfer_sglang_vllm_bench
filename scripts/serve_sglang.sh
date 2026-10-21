@@ -14,7 +14,9 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
 PROFILE="${1:?usage: serve_sglang.sh <ref|ref-nospec|tp8|tp8-nospec>}"
-IMAGE="${SGLANG_IMAGE:-lmsysorg/sglang:dev-dsv41}"
+# 优先用最新正式发行版（钉版本号，不用 latest）；正式版不支持这个模型时再退到专用镜像：
+#   SGLANG_IMAGE=lmsysorg/sglang:dev-dsv41
+IMAGE="${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.22-cu130}"
 PORT="${SGLANG_PORT:-30000}"
 NAME=bench-sglang
 
