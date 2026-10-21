@@ -186,7 +186,8 @@ def main() -> None:
     print(f"[{args.config}] run {len(items)} requests @ concurrency {args.concurrency} ...", flush=True)
     records = run_closed_loop(base_url, model, items, args.concurrency, sp, args.timeout)
     m1 = scrape_metrics(base_url)
-    spec_delta = {k: m1[k] - m0.get(k, 0.0) for k in m1 if m1[k] != m0.get(k, 0.0)}
+    # 计数器（*_total）看差值；SGLang 的 spec_accept_length / spec_accept_rate 是 gauge，差值没意义，看 after
+    spec_delta = {k: m1[k] - m0.get(k, 0.0) for k in m1 if k.split("{")[0].endswith("_total") and m1[k] != m0.get(k, 0.0)}
 
     metrics = compute_metrics(records, args.num_gpus)
     result = {
@@ -197,6 +198,7 @@ def main() -> None:
         "concurrency": args.concurrency,
         "sampling": sp,
         "server_metrics_delta": spec_delta,
+        "server_metrics_after": m1,
         "note": args.note,
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         **metrics,
