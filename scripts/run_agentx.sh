@@ -15,6 +15,21 @@ case "$BACKEND" in
     vllm)   URL="http://127.0.0.1:${VLLM_PORT:-8000}" ;;
     *) echo "unknown backend" >&2; exit 1 ;;
 esac
+METRICS_URL="$URL/metrics"
+# serve_ix.sh 起的配置：AgentX 连 recipe 要求的 frontend（router），server 的 /metrics 仍然直接抓 server；
+# recipe 的 benchmark.env 里客户端相关的设置照 InferenceX replay.py 的方式应用
+IX_FLAGS=()
+if [ -n "${IX_JSON:-}" ]; then
+    URL="$(cat "$WORK/logs/ix_endpoint${CONTAINER_SUFFIX:-}")"
+    while IFS='=' read -r k v; do
+        case "$k" in
+            AGENTIC_WARMUP_GRACE_PERIOD) IX_FLAGS+=(--warmup-grace-period "$v") ;;
+            AIPERF_MAX_CONTEXT_LENGTH)   IX_FLAGS+=(--max-context-length "$v") ;;
+            AIPERF_BENCHMARK_GRACE_PERIOD) IX_FLAGS+=(--benchmark-grace-period "$v") ;;
+            AIPERF_*) export "$k=$v" ;;
+        esac
+    done < <(python3 -c "import json;[print(f'{k}={v}') for k,v in json.load(open('$IX_JSON'))['benchmark_env'].items()]")
+fi
 
 DATASET="${AGENTX_DATASET:-semianalysis_cc_traces_weka_062126}"
 VERSION="${AGENTX_VERSION:-1.0.12}"           # InferenceX: infx/bench/agentic/requirements.txt
@@ -38,11 +53,11 @@ export AIPERF_FAILED_REQUEST_THRESHOLD=0.10     # InferenceX workflow env
     --model "$SERVED_MODEL_NAME" --tokenizer "$MODEL_DIR" \
     --concurrency "$C" --benchmark-duration "$DURATION" \
     --tokenizer-trust-remote-code \
-    --server-metrics "$URL/metrics" \
+    --server-metrics "$METRICS_URL" \
     --output-artifact-dir "$OUT/aiperf_artifacts" \
     --public-dataset "$DATASET" \
     --ui simple \
-    "${EXTRA[@]}" ${AGENTX_EXTRA_ARGS:-} \
+    "${EXTRA[@]}" "${IX_FLAGS[@]}" ${AGENTX_EXTRA_ARGS:-} \
     2>&1 | tee "$OUT/agentx.log"
 
 INFERENCEX_E2E="$INFERENCEX_E2E" python3 "$BENCH_ROOT/bench/agentx_metrics.py" "$OUT/aiperf_artifacts" \
