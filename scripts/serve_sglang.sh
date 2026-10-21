@@ -21,6 +21,7 @@ PROFILE="${1:?usage: serve_sglang.sh <ref|tp4|tp4-ep1|dpa4|dpa4-deepep|tp8>[-nos
 IMAGE="${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.22-cu130}"
 PORT="${SGLANG_PORT:-30000}"
 NAME=bench-sglang${CONTAINER_SUFFIX:-}
+# 两个 SGLang 同时跑时，除 --port 外内部的 dist-init 端口也要错开（默认是固定的 30234，不随 --port 变）
 
 # GPUS_OVERRIDE=4,5,6,7 可以把同一个档挪到别的卡上（启动阶段可以和别的任务并行；测量时 GPU 上只能有一个系统）
 SPEC=(--speculative-algorithm DSPARK --speculative-dspark-block-size 5)
@@ -72,6 +73,7 @@ docker run -d --name "$NAME" \
         --tool-call-parser auto \
         --enable-metrics \
         --host 0.0.0.0 --port "$PORT" \
+        --dist-init-addr "127.0.0.1:$((PORT + 234))" \
         ${SGLANG_EXTRA_ARGS:-}
 
 echo "sglang[$PROFILE] starting on GPUs $GPUS, port $PORT; logs: docker logs -f $NAME"

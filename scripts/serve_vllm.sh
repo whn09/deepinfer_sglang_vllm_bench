@@ -62,6 +62,9 @@ fi
 echo "speculative: ${SPEC[*]:-none}"
 
 GPUS="${GPUS_OVERRIDE:-$GPUS}"
+# 两个 vLLM 同时跑时 DP 的 RPC 端口也要错开（默认 29550）
+DP_PORT_ARGS=()
+[[ " ${PAR[*]} " == *" --data-parallel-size "* ]] && DP_PORT_ARGS=(--data-parallel-rpc-port $((29550 + (PORT - 8000) * 100)))
 bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$GPUS" || exit 1
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
@@ -89,6 +92,7 @@ docker run -d --name "$NAME" \
         --reasoning-parser deepseek_v41 \
         --mm-encoder-tp-mode data \
         --host 0.0.0.0 --port "$PORT" \
+        "${DP_PORT_ARGS[@]}" \
         "${SPEC[@]}" \
         ${VLLM_EXTRA_ARGS:-}
 
