@@ -763,10 +763,10 @@ index 0000000..bb8fae1
 +raise SystemExit(1 if mismatches else 0)
 diff --git a/serve/openai_server.py b/serve/openai_server.py
 new file mode 100644
-index 0000000..d34acdc
+index 0000000..960dbe4
 --- /dev/null
 +++ b/serve/openai_server.py
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,540 @@
 +"""Minimal OpenAI-compatible chat server on top of the DeepInfer offline engine.
 +
 +DeepInfer ships offline inference only. This wraps one `LLM` per data-parallel rank
@@ -822,8 +822,10 @@ index 0000000..d34acdc
 +    p.add_argument(
 +        "--routing",
 +        default="affinity",
-+        choices=["affinity", "least-loaded"],
-+        help="affinity: a conversation's turns go to one rank (needed for cache hits)",
++        choices=["affinity", "sticky-balanced", "least-loaded"],
++        help="affinity: a conversation's turns go to one rank chosen by hashing its key (needed for cache hits); "
++        "sticky-balanced: a new conversation goes to the rank with the fewest live conversations, then stays there "
++        "(cache hits without hash imbalance — DP ranks step in lockstep, so the busiest rank sets the step time)",
 +    )
 +    p.add_argument(
 +        "--prefill-any-interval",
@@ -1121,6 +1123,8 @@ index 0000000..d34acdc
 +        rid = uuid.uuid4().hex
 +        if self.args.routing == "affinity" and key is not None:
 +            rank = int.from_bytes(key[:4], "little") % self.args.dp
++        elif self.args.routing == "sticky-balanced" and key is not None:
++            rank = self._sticky_rank(key)
 +        else:
 +            rank = min(range(self.args.dp), key=lambda r: self.load[r])
 +        self.load[rank] += 1
@@ -1130,6 +1134,24 @@ index 0000000..d34acdc
 +        self.stats["requests"] += 1
 +        self.in_qs[rank].put(("add", rid, {"prompt_token_ids": prompt_ids, "sampling": sampling, "use_cache": use_cache}))
 +        return rid, q
++
++    SESSION_IDLE_S = 600.0
++
++    def _sticky_rank(self, key: bytes) -> int:
++        """Conversation -> rank, assigned once to the rank with the fewest live conversations (ties: fewer in-flight
++        requests). A conversation idle for SESSION_IDLE_S stops counting but keeps its rank if it comes back."""
++        now = time.monotonic()
++        sessions = self.__dict__.setdefault("_sessions", {})  # key -> [rank, last_seen]
++        hit = sessions.get(key)
++        if hit is None:
++            live = [0] * self.args.dp
++            for r, seen in sessions.values():
++                if now - seen < self.SESSION_IDLE_S:
++                    live[r] += 1
++            rank = min(range(self.args.dp), key=lambda r: (live[r], self.load[r]))
++            sessions[key] = hit = [rank, now]
++        hit[1] = now
++        return hit[0]
 +
 +    def release(self, rid: str, aborted: bool) -> None:
 +        rank = self.owner.pop(rid, None)

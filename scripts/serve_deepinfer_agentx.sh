@@ -4,7 +4,8 @@
 #   bash scripts/serve_deepinfer_agentx.sh            # GPUs 0-3, port 8888
 #   HALF=b bash scripts/serve_deepinfer_agentx.sh     # GPUs 4-7, port 8889
 # 环境变量：IX_SYNTHETIC_AL（默认 3.51，0 = 真实验证）、DI_THINKING（thinking|chat，默认 thinking，对应 golden AL 的 thinking_on）、
-#          DI_HICACHE_GB（每 rank 主机前缀缓存，默认 32；0 = 关）、DI_EXTRA（追加给 openai_server.py 的参数）
+#          DI_HICACHE_GB（每 rank 主机前缀缓存，默认 32；0 = 关）、DI_ROUTING（sticky-balanced|affinity|least-loaded，
+#          默认 sticky-balanced：哈希亲和在会话少时会让 DP rank 负载严重不均）、DI_EXTRA（追加给 openai_server.py 的参数）
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 HALF="${HALF:-a}"
@@ -21,6 +22,7 @@ docker run -d --name "$NAME" --gpus all --privileged --ipc=host --network host -
     -e DEEPINFER_HF_MODEL_DIR=/model -v "$MODEL_DIR":/model:ro \
     deepinfer:agentx python -u serve/openai_server.py --model /model --served-model-name "$SERVED_MODEL_NAME" \
         --dp 4 --port "$PORT" --thinking-mode "${DI_THINKING:-thinking}" --hicache-size-gb "${DI_HICACHE_GB:-32}" \
+        --routing "${DI_ROUTING:-sticky-balanced}" \
         ${DI_EXTRA:-} > /dev/null
 echo "deepinfer[agentx] GPUs $OFFSET-$((OFFSET + 3)) port $PORT synthetic_al=$AL; logs: docker logs -f $NAME"
 # /v1/models 在引擎加载完之前就会应答；要等 /health 报告 4 个 rank 都 ready
