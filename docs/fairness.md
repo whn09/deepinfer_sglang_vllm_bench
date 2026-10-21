@@ -54,11 +54,11 @@ Per-GPU throughput still moves with parallel size (larger EP means fewer experts
 
 | Dimension | Alignment |
 |---|---|
-| GPUs | All 8 (SGLang `tp8`, vLLM `tp8`, DeepInfer EP8); plus DeepInfer EP4 vs SGLang `ref` (both 4 GPUs) |
+| GPUs | **4 for the main comparison** — the GPU count InferenceX uses for DeepSeek-V4.1-Flash on B200 (SGLang `tp4`, vLLM `tp4`, DeepInfer EP4). 8 GPUs (SGLang `tp8`, vLLM `tp8`, DeepInfer EP8) as a supplement |
 | Weights | The same checkpoint (FP8 with FP4 experts); no extra quantization anywhere |
-| Speculation | Two groups: all off (DeepInfer `--nextn 0`, SGLang `*-nospec`, vLLM without spec), or all DSpark with a 5-token block (DeepInfer `--nextn 5`, SGLang `tp8`, vLLM `tp8-spec`). Speculative runs use ShareGPT text only. V4.1 has no MTP module; DSpark is the only speculative method. Verification policy may differ (e.g. vLLM's adaptive verification, on by default on NVIDIA) — record it |
-| Prefill chunk | 16384 (DeepInfer `--max-num-batched-tokens`, vLLM `tp8` `--max-num-batched-tokens`; SGLang default chunked prefill — confirm the value in its log) |
-| Max batch | Concurrency up to ≥ 128 (SGLang `tp8` CUDA graph bs 256, vLLM `tp8` max-num-seqs 256; the reference vLLM max-num-seqs 8 only suits low concurrency) |
+| Speculation | Two groups: all off (DeepInfer `--nextn 0`, SGLang `*-nospec`, vLLM without spec), or all DSpark with a 5-token block (DeepInfer `--nextn 5`, SGLang `tp4`, vLLM `tp4-spec`). Speculative runs use ShareGPT text only. V4.1 has no MTP module; DSpark is the only speculative method. Verification policy may differ (e.g. vLLM's adaptive verification, on by default on NVIDIA) — record it |
+| Prefill chunk | 16384 (DeepInfer `--max-num-batched-tokens`, vLLM `tp4`/`tp8` `--max-num-batched-tokens`; SGLang's default is 16384 too, confirmed in its log) |
+| Max batch | Concurrency up to ≥ 128 (SGLang `tp4`/`tp8` CUDA graph bs 256, vLLM `tp4`/`tp8` max-num-seqs 256; the reference vLLM max-num-seqs 8 only suits low concurrency) |
 
 ### 2.4 Differences to record but not force
 
@@ -160,11 +160,11 @@ Rules for this repo:
 
 | 维度 | 对齐方式 |
 |---|---|
-| 卡数 | 都用 8 卡（SGLang `tp8`、vLLM `tp8`、DeepInfer EP8）；另外 DeepInfer EP4 对 SGLang `ref`（同为 4 卡） |
+| 卡数 | **主线对比用 4 卡**，即 InferenceX 在 B200 上测 DeepSeek-V4.1-Flash 用的卡数（SGLang `tp4`、vLLM `tp4`、DeepInfer EP4）。8 卡（SGLang `tp8`、vLLM `tp8`、DeepInfer EP8）作补充 |
 | 权重 | 同一份 checkpoint（FP8 加 FP4 专家），三家都不另外量化 |
-| 投机解码 | 两组：全关（DeepInfer `--nextn 0`、SGLang `*-nospec`、vLLM 不开 spec），或全用 DSpark 5-token block（DeepInfer `--nextn 5`、SGLang `tp8`、vLLM `tp8-spec`）。开投机解码时只用 ShareGPT 文本。V4.1 没有 MTP 模块，DSpark 是唯一的投机方法。验证策略可能不同（如 vLLM 在 NVIDIA 上默认开的 adaptive verification），要记录 |
-| prefill chunk | 16384（DeepInfer `--max-num-batched-tokens`、vLLM `tp8` 的 `--max-num-batched-tokens`；SGLang 用默认 chunked prefill，跑前在日志里确认实际值） |
-| 最大 batch | 并发上限 ≥ 128（SGLang `tp8` cuda graph bs 256、vLLM `tp8` max-num-seqs 256；官方参考的 vLLM max-num-seqs 8 只适合低并发） |
+| 投机解码 | 两组：全关（DeepInfer `--nextn 0`、SGLang `*-nospec`、vLLM 不开 spec），或全用 DSpark 5-token block（DeepInfer `--nextn 5`、SGLang `tp4`、vLLM `tp4-spec`）。开投机解码时只用 ShareGPT 文本。V4.1 没有 MTP 模块，DSpark 是唯一的投机方法。验证策略可能不同（如 vLLM 在 NVIDIA 上默认开的 adaptive verification），要记录 |
+| prefill chunk | 16384（DeepInfer `--max-num-batched-tokens`、vLLM `tp4`/`tp8` 的 `--max-num-batched-tokens`；SGLang 默认值也是 16384，日志里已确认） |
+| 最大 batch | 并发上限 ≥ 128（SGLang `tp4`/`tp8` cuda graph bs 256、vLLM `tp4`/`tp8` max-num-seqs 256；官方参考的 vLLM max-num-seqs 8 只适合低并发） |
 
 ### 2.4 必须记录、但不强行对齐的差异
 

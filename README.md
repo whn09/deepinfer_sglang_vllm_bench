@@ -55,19 +55,19 @@ rsync -av --exclude results --exclude .git ./ B200-1:/opt/dlami/nvme/bench_tmp/r
 ssh B200-1
 cd /opt/dlami/nvme/bench_tmp/repo && source scripts/env.sh
 
-# 2. DeepInfer (no server may hold the GPUs)
+# 2. DeepInfer (no server may hold the GPUs) — main comparison is 4 GPUs, like InferenceX
 bash scripts/stop_servers.sh
-bash scripts/sweep_deepinfer.sh deepinfer-ep8-nospec  8 0 sg-1k-1k
-bash scripts/sweep_deepinfer.sh deepinfer-ep8-dspark5 8 5 sg-1k-1k
+bash scripts/sweep_deepinfer.sh deepinfer-ep4-nospec  4 0 sg-1k-1k
+bash scripts/sweep_deepinfer.sh deepinfer-ep4-dspark5 4 5 sg-1k-1k
 
 # 3. SGLang
-bash scripts/serve_sglang.sh tp8-nospec && bash scripts/sweep_server.sh sglang sglang-tp8-nospec 8 sg-1k-1k
-bash scripts/serve_sglang.sh tp8        && bash scripts/sweep_server.sh sglang sglang-tp8        8 sg-1k-1k
+bash scripts/serve_sglang.sh tp4-nospec && bash scripts/sweep_server.sh sglang sglang-tp4-nospec 4 sg-1k-1k
+bash scripts/serve_sglang.sh tp4        && bash scripts/sweep_server.sh sglang sglang-tp4        4 sg-1k-1k
 bash scripts/stop_servers.sh
 
 # 4. vLLM
-bash scripts/serve_vllm.sh tp8      && bash scripts/sweep_server.sh vllm vllm-tp8      8 sg-1k-1k
-bash scripts/serve_vllm.sh tp8-spec && bash scripts/sweep_server.sh vllm vllm-tp8-spec 8 sg-1k-1k
+bash scripts/serve_vllm.sh tp4      && bash scripts/sweep_server.sh vllm vllm-tp4      4 sg-1k-1k
+bash scripts/serve_vllm.sh tp4-spec && bash scripts/sweep_server.sh vllm vllm-tp4-spec 4 sg-1k-1k
 bash scripts/stop_servers.sh
 
 # 5. summarize
@@ -77,7 +77,7 @@ python bench/summarize.py $RESULTS_DIR/results.jsonl
 bash scripts/pull_results.sh B200-1 --clean
 ```
 
-For the official reference configs (tier A) use `ref` instead of `tp8`: SGLang `ref` uses 4 GPUs and pairs with `deepinfer-ep4-*` (`sweep_deepinfer.sh ... 4 ...`); vLLM `ref` uses 2 GPUs with max-num-seqs 8, so restrict it to low concurrency with `CONCURRENCIES="1 2 4 8"`.
+The 8-GPU supplement uses `tp8` and `deepinfer-ep8-*` (`sweep_deepinfer.sh ... 8 ...`). The official reference configs (tier A) use `ref`: SGLang `ref` is TP4/EP4 with CUDA graphs only up to bs 64; vLLM `ref` uses 2 GPUs with max-num-seqs 8, so restrict it to low concurrency with `CONCURRENCIES="1 2 4 8"`.
 
 AgentX: see `docs/agentx.md`.
 
@@ -140,7 +140,7 @@ B200 机器不固定。所有东西都放在 `/opt/dlami/nvme/bench_tmp`（`$WOR
 5. 汇总
 6. 本地：拉回结果并清理远端临时目录
 
-官方参考配置（A 层）把 `tp8` 换成 `ref`：SGLang `ref` 用 4 卡，对应 `deepinfer-ep4-*`（`sweep_deepinfer.sh ... 4 ...`）；vLLM `ref` 用 2 卡、max-num-seqs 8，只适合低并发，用 `CONCURRENCIES="1 2 4 8"` 限定并发点。
+主线对比用 4 卡（和 InferenceX 一致），命令见上方英文部分。8 卡补充用 `tp8` 和 `deepinfer-ep8-*`（`sweep_deepinfer.sh ... 8 ...`）。官方参考配置（A 层）用 `ref`：SGLang `ref` 是 TP4/EP4，但 cuda graph 只到 bs 64；vLLM `ref` 用 2 卡、max-num-seqs 8，只适合低并发，用 `CONCURRENCIES="1 2 4 8"` 限定并发点。
 
 AgentX：见 `docs/agentx.md`。
 

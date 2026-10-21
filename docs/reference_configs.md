@@ -73,7 +73,7 @@ Use the latest official release, pinned by version (not `latest`); fall back to 
 | Memory fraction | 0.9 | 0.8 | 0.97 |
 | Other | — | — | engram CPU offload; FlashInfer autotune |
 
-The vLLM reference (2 GPUs, max-num-seqs 8) is clearly latency-oriented: beyond concurrency 8 requests queue. The SGLang reference captures CUDA graphs only up to decode bs 64 and falls back to eager above that. That is why this repo adds 8-GPU, high-concurrency `tp8` profiles next to the verbatim references (`scripts/serve_*.sh`).
+The vLLM reference (2 GPUs, max-num-seqs 8) is clearly latency-oriented: beyond concurrency 8 requests queue. The SGLang reference captures CUDA graphs only up to decode bs 64 and falls back to eager above that. That is why this repo adds high-concurrency `tp4` profiles (4 GPUs, the main comparison, matching InferenceX) and `tp8` profiles (8 GPUs, supplement) next to the verbatim references (`scripts/serve_*.sh`).
 
 ## Config names in this repo
 
@@ -81,10 +81,14 @@ The vLLM reference (2 GPUs, max-num-seqs 8) is clearly latency-oriented: beyond 
 |---|---|---|
 | `sglang-ref` | `serve_sglang.sh ref` | 0-3 |
 | `sglang-ref-nospec` | `serve_sglang.sh ref-nospec` | 0-3 |
+| `sglang-tp4` | `serve_sglang.sh tp4` | 0-3 |
+| `sglang-tp4-nospec` | `serve_sglang.sh tp4-nospec` | 0-3 |
 | `sglang-tp8` | `serve_sglang.sh tp8` | 0-7 |
 | `sglang-tp8-nospec` | `serve_sglang.sh tp8-nospec` | 0-7 |
 | `vllm-ref` | `serve_vllm.sh ref` | 0-1 |
 | `vllm-ref-spec` | `serve_vllm.sh ref-spec` | 0-1 |
+| `vllm-tp4` | `serve_vllm.sh tp4` | 0-3 |
+| `vllm-tp4-spec` | `serve_vllm.sh tp4-spec` | 0-3 |
 | `vllm-tp8` | `serve_vllm.sh tp8` | 0-7 |
 | `vllm-tp8-spec` | `serve_vllm.sh tp8-spec` | 0-7 |
 | `deepinfer-ep8-nospec` | `sweep_deepinfer.sh deepinfer-ep8-nospec 8 0 <scenario>` | 0-7 |
@@ -129,7 +133,7 @@ V4.1 去掉了 V3/V4 和主干一起训练的 MTP 模块，**DSpark 是这个 ch
 | 显存占比 | 0.9 | 0.8 | 0.97 |
 | 其他 | — | — | engram CPU 卸载；FlashInfer autotune |
 
-vLLM 参考配置（2 卡、max-num-seqs 8）明显是低延迟取向，并发超过 8 就会排队；SGLang 参考配置的 cuda graph 只覆盖到 decode bs 64，再往上会退回 eager。所以本仓库在原样照抄的参考配置之外，还提供了 8 卡、大并发的 `tp8` 档（见 `scripts/serve_*.sh`）。
+vLLM 参考配置（2 卡、max-num-seqs 8）明显是低延迟取向，并发超过 8 就会排队；SGLang 参考配置的 cuda graph 只覆盖到 decode bs 64，再往上会退回 eager。所以本仓库在原样照抄的参考配置之外，还提供了大并发的 `tp4` 档（4 卡，主线对比，和 InferenceX 一致）和 `tp8` 档（8 卡，补充），见 `scripts/serve_*.sh`。
 
 ## 本仓库各配置名
 

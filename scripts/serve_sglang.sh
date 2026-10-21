@@ -5,6 +5,8 @@
 # profile：
 #   ref         官方参考命令原样：TP4/EP4、DSPARK block 5、cuda graph decode bs ≤ 64，用 0-3 号卡
 #   ref-nospec  同上，去掉投机解码
+#   tp4         4 卡（主线）：TP4/EP4、DSPARK block 5、cuda graph decode bs ≤ 256（ref 只到 64，扫到 c=128 会退回 eager）
+#   tp4-nospec  同上，去掉投机解码
 #   tp8         8 卡：TP8/EP8、DSPARK block 5、cuda graph decode bs ≤ 256
 #   tp8-nospec  同上，去掉投机解码
 #
@@ -13,22 +15,26 @@
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-PROFILE="${1:?usage: serve_sglang.sh <ref|ref-nospec|tp8|tp8-nospec>}"
+PROFILE="${1:?usage: serve_sglang.sh <ref|ref-nospec|tp4|tp4-nospec|tp8|tp8-nospec>}"
 # 优先用最新正式发行版（钉版本号，不用 latest）；正式版不支持这个模型时再退到专用镜像：
 #   SGLANG_IMAGE=lmsysorg/sglang:dev-dsv41
 IMAGE="${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.22-cu130}"
 PORT="${SGLANG_PORT:-30000}"
 NAME=bench-sglang
 
+# GPUS_OVERRIDE=4,5,6,7 可以把同一个档挪到别的卡上（启动阶段可以和别的任务并行；测量时 GPU 上只能有一个系统）
 SPEC=(--speculative-algorithm DSPARK --speculative-dspark-block-size 5)
 case "$PROFILE" in
     ref)        GPUS=0,1,2,3;       PAR=(--tp 4 --ep-size 4); GRAPH_BS=64 ;;
     ref-nospec) GPUS=0,1,2,3;       PAR=(--tp 4 --ep-size 4); GRAPH_BS=64;  SPEC=() ;;
+    tp4)        GPUS=0,1,2,3;       PAR=(--tp 4 --ep-size 4); GRAPH_BS=256 ;;
+    tp4-nospec) GPUS=0,1,2,3;       PAR=(--tp 4 --ep-size 4); GRAPH_BS=256; SPEC=() ;;
     tp8)        GPUS=0,1,2,3,4,5,6,7; PAR=(--tp 8 --ep-size 8); GRAPH_BS=256 ;;
     tp8-nospec) GPUS=0,1,2,3,4,5,6,7; PAR=(--tp 8 --ep-size 8); GRAPH_BS=256; SPEC=() ;;
     *) echo "unknown profile $PROFILE" >&2; exit 1 ;;
 esac
 
+GPUS="${GPUS_OVERRIDE:-$GPUS}"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
     --gpus "\"device=$GPUS\"" \

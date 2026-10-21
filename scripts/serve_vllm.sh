@@ -6,6 +6,8 @@
 #   ref        官方参考命令原样：TP2、max-num-seqs 8、max-num-batched-tokens 4096、fp8 KV、
 #              engram CPU offload，不开投机解码，用 0-1 号卡
 #   ref-spec   ref + DSpark 投机解码（5-token block）
+#   tp4        4 卡（主线，对齐 InferenceX 的 vLLM TP4）：TP4，max-num-seqs 256，max-num-batched-tokens 16384，其余同 ref
+#   tp4-spec   tp4 + DSpark 投机解码
 #   tp8        8 卡：TP8，max-num-seqs 256，max-num-batched-tokens 16384，其余同 ref
 #   tp8-spec   tp8 + DSpark 投机解码
 #
@@ -19,7 +21,7 @@
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-PROFILE="${1:?usage: serve_vllm.sh <ref|ref-spec|tp8|tp8-spec>}"
+PROFILE="${1:?usage: serve_vllm.sh <ref|ref-spec|tp4|tp4-spec|tp8|tp8-spec>}"
 # 优先用最新正式发行版（钉版本号，不用 latest）
 IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.32.0}"
 PORT="${VLLM_PORT:-8000}"
@@ -27,9 +29,11 @@ NAME=bench-vllm
 
 case "$PROFILE" in
     ref|ref-spec) GPUS=0,1;             TP=2; MAX_SEQS=8;   MAX_BATCHED=4096 ;;
+    tp4|tp4-spec) GPUS=0,1,2,3;         TP=4; MAX_SEQS=256; MAX_BATCHED=16384 ;;
     tp8|tp8-spec) GPUS=0,1,2,3,4,5,6,7; TP=8; MAX_SEQS=256; MAX_BATCHED=16384 ;;
     *) echo "unknown profile $PROFILE" >&2; exit 1 ;;
 esac
+# GPUS_OVERRIDE=4,5,6,7 可以把同一个档挪到别的卡上（启动阶段可以和别的任务并行；测量时 GPU 上只能有一个系统）
 SPEC=()
 if [[ "$PROFILE" == *-spec ]]; then
     if [ -n "${VLLM_SPEC_CONFIG:-}" ]; then
@@ -45,6 +49,7 @@ if [[ "$PROFILE" == *-spec ]]; then
 fi
 echo "speculative: ${SPEC[*]:-none}"
 
+GPUS="${GPUS_OVERRIDE:-$GPUS}"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
     --gpus "\"device=$GPUS\"" \
