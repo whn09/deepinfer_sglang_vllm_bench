@@ -20,7 +20,7 @@
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-PROFILE="${1:?usage: serve_vllm.sh <ref|tp4|dep4|dep4-deepep|tp8>[-spec]}"
+PROFILE="${1:?usage: serve_vllm.sh <ref|tp4|dep4|dep4-deepep|tp8>[-spec] | ix-tp4}"
 # 优先用最新正式发行版（钉版本号，不用 latest）
 IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.32.0}"
 PORT="${VLLM_PORT:-8000}"
@@ -28,6 +28,9 @@ NAME=bench-vllm${CONTAINER_SUFFIX:-}
 
 KERNEL_CFG='{"enable_flashinfer_autotune":true}'
 ENGRAM_CFG='{"cpu_offload":true,"use_thp":true}'
+COMPILE_CFG='{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]}'
+CAPTURE=4092
+IX_ARGS=()
 case "${PROFILE%-spec}" in
     ref) GPUS=0,1;             PAR=(--tensor-parallel-size 2); MAX_SEQS=8;   MAX_BATCHED=4096 ;;
     tp4) GPUS=0,1,2,3;         PAR=(--tensor-parallel-size 4); MAX_SEQS=256; MAX_BATCHED=16384 ;;
@@ -42,12 +45,26 @@ case "${PROFILE%-spec}" in
           MAX_SEQS=64;  MAX_BATCHED=8192
           ENGRAM_CFG='{"cpu_offload":true,"embedding_across_dp":true}' ;;
     tp8) GPUS=0,1,2,3,4,5,6,7; PAR=(--tensor-parallel-size 8); MAX_SEQS=256; MAX_BATCHED=16384 ;;
+    # InferenceX AgentX recipe（dsv41flash/vllm/b200-fp4-mtp/agentic.yaml 的 base + zip_override_tp4），给 #4 用。
+    # 投机解码固定按 recipe（block rejection、adaptive verification 关），吞吐测试用 golden 合成接受长度
+    # （IX_SYNTHETIC_AL，默认 3.51 = DSpark 5 thinking on；设 0 用真实验证）。不需要再加 -spec 后缀。
+    ix-tp4) GPUS=0,1,2,3;      PAR=(--tensor-parallel-size 4); MAX_SEQS=256; MAX_BATCHED=8192
+          COMPILE_CFG='{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092,6144,8190]}'
+          CAPTURE=8190
+          IX_ARGS=(--language-model-only --max-model-len 1048576 --disable-uvicorn-access-log) ;;
     *) echo "unknown profile $PROFILE" >&2; exit 1 ;;
 esac
 # 官方参考命令带 --privileged：容器能看到全部 GPU（物理编号），--gpus device=... 不起作用，选卡只能靠 CUDA_VISIBLE_DEVICES。
 # GPUS_OVERRIDE=4,5,6,7 可以把同一个档挪到别的卡上（启动阶段可以和别的任务并行；测量时 GPU 上只能有一个系统）
 SPEC=()
-if [[ "$PROFILE" == *-spec ]]; then
+if [[ "$PROFILE" == ix-* ]]; then
+    AL="${IX_SYNTHETIC_AL:-3.51}"
+    if [ "$AL" = "0" ]; then
+        SPEC=(--speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}')
+    else
+        SPEC=(--speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":'"$AL"',"enable_adaptive_verification":false}')
+    fi
+elif [[ "$PROFILE" == *-spec ]]; then
     if [ -n "${VLLM_SPEC_CONFIG:-}" ]; then
         SPEC_JSON="$VLLM_SPEC_CONFIG"
     else
@@ -75,8 +92,8 @@ docker run -d --name "$NAME" \
     -v "$MODEL_DIR":/model:ro \
     -v "$WORK/cache/vllm":/root/.cache \
     -v "$HF_HOME":/root/.cache/huggingface \
-    -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
     -e VLLM_USE_V2_MODEL_RUNNER=1 \
+    -e VLLM_ENGINE_READY_TIMEOUT_S=7200 \
     "$IMAGE" /model \
         --served-model-name "$SERVED_MODEL_NAME" \
         --tokenizer-mode deepseek_v41 \
@@ -88,8 +105,9 @@ docker run -d --name "$NAME" \
         --engram-config "$ENGRAM_CFG" \
         --max-num-seqs "$MAX_SEQS" \
         --max-num-batched-tokens "$MAX_BATCHED" \
-        --compilation-config '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]}' \
-        --max-cudagraph-capture-size 4092 \
+        --compilation-config "$COMPILE_CFG" \
+        --max-cudagraph-capture-size "$CAPTURE" \
+        "${IX_ARGS[@]}" \
         --tool-call-parser deepseek_v41 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v41 \
