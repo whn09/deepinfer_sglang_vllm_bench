@@ -23,4 +23,12 @@ docker run -d --name "$NAME" --gpus all --privileged --ipc=host --network host -
         --dp 4 --port "$PORT" --thinking-mode "${DI_THINKING:-thinking}" --hicache-size-gb "${DI_HICACHE_GB:-32}" \
         ${DI_EXTRA:-} > /dev/null
 echo "deepinfer[agentx] GPUs $OFFSET-$((OFFSET + 3)) port $PORT synthetic_al=$AL; logs: docker logs -f $NAME"
+# /v1/models 在引擎加载完之前就会应答；要等 /health 报告 4 个 rank 都 ready
 bash "$BENCH_ROOT/scripts/wait_ready.sh" "http://127.0.0.1:$PORT" "$NAME" "${DI_READY_TIMEOUT:-3600}"
+START=$(date +%s)
+until curl -s -m 5 "http://127.0.0.1:$PORT/health" | grep -q '"status":"ok"'; do
+    if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != "true" ]; then docker logs --tail 60 "$NAME" >&2; exit 1; fi
+    [ $(( $(date +%s) - START )) -gt "${DI_READY_TIMEOUT:-3600}" ] && { echo "engine not ready" >&2; exit 1; }
+    sleep 15
+done
+echo "engine ready after $(( $(date +%s) - START ))s"
