@@ -60,6 +60,8 @@ Per-GPU throughput still moves with parallel size (larger EP means fewer experts
 | Prefill chunk | 16384 (DeepInfer `--max-num-batched-tokens`, vLLM `tp4`/`tp8` `--max-num-batched-tokens`; SGLang's default is 16384 too, confirmed in its log) |
 | Max batch | Concurrency up to ≥ 128 (SGLang `tp4`/`tp8` CUDA graph bs 256, vLLM `tp4`/`tp8` max-num-seqs 256; the reference vLLM max-num-seqs 8 only suits low concurrency) |
 
+- **Tier C — same parallel strategy (ablation)**: SGLang and vLLM also run DeepInfer's strategy, attention DP + MoE EP + DeepEP (both release images ship a DeepEP build). It splits a gap into "parallel strategy" vs "implementation of the same strategy". Tiers A/B keep each stack's recommended config: DeepEP is intrinsic to DeepInfer's design, while InferenceX's own B200 recipes do not use DeepEP either (SGLang `moe-a2a-backend: none`, vLLM DEP with MegaMoE), and forcing one stack's internals onto another is not "fairer".
+
 ### 2.4 Differences to record but not force
 
 These are part of each implementation; do not force them equal, but state them next to the results:
@@ -165,6 +167,8 @@ Rules for this repo:
 | 投机解码 | 两组：全关（DeepInfer `--nextn 0`、SGLang `*-nospec`、vLLM 不开 spec），或全用 DSpark 5-token block（DeepInfer `--nextn 5`、SGLang `tp4`、vLLM `tp4-spec`）。开投机解码时只用 ShareGPT 文本。V4.1 没有 MTP 模块，DSpark 是唯一的投机方法。验证策略可能不同（如 vLLM 在 NVIDIA 上默认开的 adaptive verification），要记录 |
 | prefill chunk | 16384（DeepInfer `--max-num-batched-tokens`、vLLM `tp4`/`tp8` 的 `--max-num-batched-tokens`；SGLang 默认值也是 16384，日志里已确认） |
 | 最大 batch | 并发上限 ≥ 128（SGLang `tp4`/`tp8` cuda graph bs 256、vLLM `tp4`/`tp8` max-num-seqs 256；官方参考的 vLLM max-num-seqs 8 只适合低并发） |
+
+- **C 层：相同并行策略（消融）**：让 SGLang 和 vLLM 也用 DeepInfer 的并行策略，即 attention DP + MoE EP + DeepEP（两家的正式版镜像里都带了 DeepEP）。用来把差距拆成"并行策略不同"和"同样策略下实现的快慢"两部分。A/B 层仍然用各家推荐的配置：DeepEP 是 DeepInfer 设计里固有的一部分，而 InferenceX 自己的 B200 recipe 也没有用 DeepEP（SGLang 用 `moe-a2a-backend: none`，vLLM DEP 用 MegaMoE）；把一家的内部实现强加给另一家，并不会更公平。
 
 ### 2.4 必须记录、但不强行对齐的差异
 
