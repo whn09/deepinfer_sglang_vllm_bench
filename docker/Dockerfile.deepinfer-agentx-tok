@@ -1,6 +1,8 @@
-# Thin layer over deepinfer:agentx-trace: exact parallel tokenization in the OpenAI server (#17). Python-only.
+# Thin layer over deepinfer:agentx-trace: fast prompt tokenization in the OpenAI server (#17). Python-only.
+# --tokenizer-backend auto = fastokens (crusoecloud/fastokens, also vLLM's Rust frontend tokenizer) when installed,
+# else special-token split + encode_batch; both are checked against tokenizer.encode at startup.
 #   docker build -f docker/Dockerfile.deepinfer-agentx-tok -t deepinfer:agentx-tok .
 ARG BASE=deepinfer:agentx-trace
 FROM ${BASE}
 COPY patches/deepinfer-agentx-parallel-tokenize.patch /tmp/tok.patch
-RUN cd /workspace/DeepInfer && git apply /tmp/tok.patch && rm /tmp/tok.patch
+RUN cd /workspace/DeepInfer && git apply /tmp/tok.patch && rm /tmp/tok.patch && /opt/venv/bin/pip install -q fastokens==0.3.4

@@ -1,5 +1,5 @@
 diff --git a/serve/openai_server.py b/serve/openai_server.py
-index b40e6e9..d9ed28c 100644
+index b40e6e9..2ced041 100644
 --- a/serve/openai_server.py
 +++ b/serve/openai_server.py
 @@ -21,6 +21,7 @@ import json
@@ -10,42 +10,77 @@ index b40e6e9..d9ed28c 100644
  import sys
  import threading
  import time
-@@ -331,6 +332,17 @@ class Frontend:
+@@ -48,6 +49,13 @@ def parse_args() -> argparse.Namespace:
+     p.add_argument("--yoco-keep-tokens", type=int, default=140, help="0 disables decoder SWA bounded replay")
+     p.add_argument("--thinking-mode", default="chat", choices=["chat", "thinking"])
+     p.add_argument("--log-interval-steps", type=int, default=200)
++    p.add_argument(
++        "--tokenizer-backend",
++        default="auto",
++        choices=["auto", "fastokens", "split", "hf"],
++        help="prompt encoding: fastokens (pip install fastokens) > split (special-token split + encode_batch) > hf; "
++        "auto picks the first available; every fast path is checked against tokenizer.encode at startup",
++    )
+     p.add_argument("--hicache-size-gb", type=float, default=32, help="pinned host KV page pool per DP rank; 0 disables the prefix cache")
+     p.add_argument("--hicache-state-slots", type=int, default=4096, help="host SWA state slots per DP rank")
+     p.add_argument(
+@@ -331,6 +339,36 @@ class Frontend:
          self.model_name = args.served_model_name or args.model
          self.encode_messages = encode_messages
          self.tokenizer = AutoTokenizer.from_pretrained(args.model)
-+        # Exact parallel tokenization: HF tokenizers split the input at added/special tokens before running the
-+        # model, so encoding the pieces between them in one encode_batch call (multi-threaded in Rust) yields the
-+        # same ids as encode() on the whole prompt. A 167K-token agentic prompt: 250 ms -> 77 ms.
-+        added = sorted(self.tokenizer.get_added_vocab(), key=len, reverse=True)
-+        self._special_split = re.compile("(" + "|".join(re.escape(t) for t in added) + ")") if added else None
-+        probe = "<｜begin▁of▁sentence｜>hello <｜User｜>world  x\n<｜Assistant｜></think>ok"
-+        if self._special_split is not None and self._encode(probe) != self.tokenizer.encode(probe, add_special_tokens=False):
-+            print("[server] parallel tokenization mismatch on the probe, falling back to tokenizer.encode", flush=True)
-+            self._special_split = None
++        # Prompt encoding is the largest frontend cost for long agentic prompts (a 167K-token conversation:
++        # tokenizer.encode 240 ms). Backends, all checked against tokenizer.encode at startup:
++        #   fastokens: crusoecloud/fastokens, the BPE tokenizer vLLM's Rust frontend loads first (2 ms, same ids)
++        #   split:     split at added/special tokens (HF tokenizers splits there before BPE anyway) and encode the
++        #              pieces with one multi-threaded encode_batch call (77 ms, same ids)
++        #   hf:        tokenizer.encode
++        self._fast = None
++        self._special_split = None
++        backend = args.tokenizer_backend
++        if backend in ("auto", "fastokens"):
++            try:
++                from fastokens._native import Tokenizer as FastTokenizer
++
++                self._fast = FastTokenizer.from_file(str(Path(args.model) / "tokenizer.json"))
++            except Exception as e:  # noqa: BLE001 - optional dependency
++                if backend == "fastokens":
++                    raise
++                print(f"[server] fastokens unavailable ({e!r}), using split tokenization", flush=True)
++        if self._fast is None and backend in ("auto", "split"):
++            added = sorted(self.tokenizer.get_added_vocab(), key=len, reverse=True)
++            self._special_split = re.compile("(" + "|".join(re.escape(t) for t in added) + ")") if added else None
++        probe = "<｜begin▁of▁sentence｜>hello <｜User｜>world  x\n<｜Assistant｜></think>ok 你好"
++        if (self._fast is not None or self._special_split is not None) and self._encode(probe) != self.tokenizer.encode(
++            probe, add_special_tokens=False
++        ):
++            print("[server] fast tokenization mismatch on the probe, falling back to tokenizer.encode", flush=True)
++            self._fast = self._special_split = None
++        print(f"[server] tokenizer backend: {'fastokens' if self._fast else 'split' if self._special_split else 'hf'}", flush=True)
 +        # DEEPINFER_TOKENIZE_VERIFY=N: also run tokenizer.encode on the first N real prompts and compare
 +        self._verify_left = int(os.environ.get("DEEPINFER_TOKENIZE_VERIFY", "0"))
          ctx = mp.get_context("spawn")
          self.out_q: mp.Queue = ctx.Queue()
          self.in_qs: list[mp.Queue] = [ctx.Queue() for _ in range(args.dp)]
-@@ -422,7 +434,24 @@ class Frontend:
+@@ -422,7 +460,26 @@ class Frontend:
              if body.get("tools"):
                  parts.insert(1, json.dumps(body["tools"], ensure_ascii=False))
              prompt = "".join(parts) + "<｜Assistant｜></think>"
 -        return self.tokenizer.encode(prompt, add_special_tokens=False)
 +        ids = self._encode(prompt)
-+        if self._verify_left > 0 and self._special_split is not None:
++        if self._verify_left > 0 and (self._fast is not None or self._special_split is not None):
 +            self._verify_left -= 1
 +            ref = self.tokenizer.encode(prompt, add_special_tokens=False)
 +            if ref != ids:
-+                print(f"[server] parallel tokenization MISMATCH ({len(ids)} vs {len(ref)} ids); falling back", flush=True)
-+                self._special_split = None
++                print(f"[server] fast tokenization MISMATCH ({len(ids)} vs {len(ref)} ids); falling back", flush=True)
++                self._fast = self._special_split = None
 +                return ref
 +            if self._verify_left == 0:
-+                print("[server] parallel tokenization verified on real prompts", flush=True)
++                print("[server] fast tokenization verified on real prompts", flush=True)
 +        return ids
 +
 +    def _encode(self, text: str) -> list[int]:
++        if self._fast is not None:
++            return list(self._fast.encode(text).ids)
 +        if self._special_split is None:
 +            return self.tokenizer.encode(text, add_special_tokens=False)
 +        parts = [p for p in self._special_split.split(text) if p]
