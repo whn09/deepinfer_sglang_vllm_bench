@@ -763,10 +763,10 @@ index 0000000..bb8fae1
 +raise SystemExit(1 if mismatches else 0)
 diff --git a/serve/openai_server.py b/serve/openai_server.py
 new file mode 100644
-index 0000000..fe88519
+index 0000000..b40e6e9
 --- /dev/null
 +++ b/serve/openai_server.py
-@@ -0,0 +1,561 @@
+@@ -0,0 +1,636 @@
 +"""Minimal OpenAI-compatible chat server on top of the DeepInfer offline engine.
 +
 +DeepInfer ships offline inference only. This wraps one `LLM` per data-parallel rank
@@ -924,16 +924,33 @@ index 0000000..fe88519
 +
 +    pending = collections.deque()  # (rid, seq, prompt_ids, use_cache): created, waiting for a cache decision
 +    inflight = False
++    # DEEPINFER_SERVER_TRACE: per-request TTFT stages (wall clock, same host as the frontend). Step accounting
++    # attributes every engine step between a request's scheduler enqueue and its first token to it.
++    tracing = bool(os.environ.get("DEEPINFER_SERVER_TRACE"))
++    traces: dict[str, dict] = {}
++    step_acc = [0, 0.0, 0, 0.0]  # prefill steps, prefill s, decode steps, decode s (cumulative)
++    last_prompt_run = [False]
++    if tracing:
++        orig_post_schedule = engine.post_schedule
++
++        def post_schedule(so):
++            last_prompt_run[0] = bool(so.prompt_run)
++            return orig_post_schedule(so)
++
++        engine.post_schedule = post_schedule
 +    last_stats = time.monotonic()
 +    last_logged_lookups = 0
 +    while True:
 +        # Requests must be enqueued before the DP-wide has_unfinished_requests all-reduce,
 +        # so every rank takes the same step / flush / idle branch in the same iteration.
 +        while True:
++            t_get = time.time()
 +            try:
 +                kind, rid, payload = in_q.get_nowait()
 +            except queue.Empty:
 +                break
++            if tracing and kind == "add":
++                traces[rid] = {"w_get0": t_get, "w_dequeued": time.time(), "plen": len(payload["prompt_token_ids"])}
 +            if kind == "add":
 +                try:
 +                    prompt_ids = np.asarray(payload["prompt_token_ids"], dtype=np.int32)
@@ -945,6 +962,10 @@ index 0000000..fe88519
 +                        multi_modal_data=mm_data(),
 +                        enqueue=cache is None,
 +                    )
++                    if tracing:
++                        traces[rid]["w_added"] = time.time()
++                        if cache is None:
++                            traces[rid].update(w_enqueued=time.time(), hit=0, acc0=list(step_acc))
 +                    if cache is not None:
 +                        if seq is None:
 +                            out_q.put(("error", rid, "request dropped: invalid prompt tokens"))
@@ -968,7 +989,11 @@ index 0000000..fe88519
 +            if hit < 0 and (engine.scheduler.get_num_unfinished_seqs() > 0 or inflight):
 +                break
 +            pending.popleft()
++            if tracing and rid in traces:
++                traces[rid]["w_cache_done"] = time.time()
 +            enqueue(rid, seq, max(hit, 0))
++            if tracing and rid in traces:
++                traces[rid].update(w_enqueued=time.time(), hit=max(hit, 0), acc0=list(step_acc))
 +        if cache is not None:
 +            cache.poll()
 +            if time.monotonic() - last_stats > 5:
@@ -985,6 +1010,7 @@ index 0000000..fe88519
 +                        flush=True,
 +                    )
 +
++        t_step = time.time()
 +        if engine.has_unfinished_requests():
 +            outputs = engine.step()
 +            inflight = True
@@ -994,6 +1020,14 @@ index 0000000..fe88519
 +        else:
 +            time.sleep(0.001)
 +            continue
++        if tracing:
++            dt = time.time() - t_step
++            if last_prompt_run[0]:
++                step_acc[0] += 1
++                step_acc[1] += dt
++            else:
++                step_acc[2] += 1
++                step_acc[3] += dt
 +
 +        if len(outputs):
 +            # Pointers are recycled on the next step, so read the fields now.
@@ -1011,6 +1045,21 @@ index 0000000..fe88519
 +                for rid, _, finished, _, _ in batch:
 +                    if finished:
 +                        cache.forget(rid)
++            if tracing:
++                now = time.time()
++                for rid, *_ in batch:
++                    tr = traces.pop(rid, None)
++                    if tr is not None and "acc0" in tr:
++                        a0 = tr.pop("acc0")
++                        tr.update(
++                            w_first_token=now,
++                            prefill_steps=step_acc[0] - a0[0],
++                            prefill_step_s=step_acc[1] - a0[1],
++                            decode_steps=step_acc[2] - a0[2],
++                            decode_step_s=step_acc[3] - a0[3],
++                            rank=dp_rank,
++                        )
++                        out_q.put(("trace", rid, tr))
 +            out_q.put(("tokens", None, batch))
 +
 +
@@ -1063,6 +1112,9 @@ index 0000000..fe88519
 +        self.stats = dict(requests=0, finished=0, aborted=0, errors=0, prompt_tokens=0, completion_tokens=0, encode_fallbacks=0)
 +        self.cache_stats: dict[int, dict] = {}
 +        self.loop: asyncio.AbstractEventLoop | None = None
++        trace_path = os.environ.get("DEEPINFER_SERVER_TRACE")
++        self.trace_file = open(trace_path, "a") if trace_path else None
++        self.traces: dict[str, dict] = {}
 +
 +    def start(self) -> None:
 +        for p in self.procs:
@@ -1089,8 +1141,21 @@ index 0000000..fe88519
 +                self.loop.call_soon_threadsafe(self._deliver, rid, ("error", payload))
 +            elif kind == "stats":
 +                self.cache_stats[rid] = payload
++            elif kind == "trace":
++                self.loop.call_soon_threadsafe(self._trace_merge, rid, payload)
 +            else:
 +                self.loop.call_soon_threadsafe(self._deliver_batch, payload)
++
++    def _trace_merge(self, rid: str, payload: dict) -> None:
++        tr = self.traces.get(rid)
++        if tr is not None:
++            tr.update(payload)
++
++    def trace_done(self, rid: str) -> None:
++        tr = self.traces.pop(rid, None)
++        if tr is not None and self.trace_file is not None:
++            self.trace_file.write(json.dumps(tr) + "\n")
++            self.trace_file.flush()
 +
 +    def _deliver(self, rid: str, item) -> None:
 +        q = self.streams.get(rid)
@@ -1219,10 +1284,13 @@ index 0000000..fe88519
 +
 +    @app.post("/v1/chat/completions")
 +    async def chat(request: Request):
++        t_recv = time.time()
 +        if fe.ready != fe.args.dp:
 +            return JSONResponse({"error": {"message": "engine loading"}}, status_code=503)
 +        body = await request.json()
++        t_json = time.time()
 +        prompt_ids = await asyncio.to_thread(fe.render_prompt, body)
++        t_rendered = time.time()
 +        max_tokens = body.get("max_completion_tokens") or body.get("max_tokens") or 4096
 +        if len(prompt_ids) + 1 > fe.args.max_model_len:
 +            return JSONResponse({"error": {"message": f"prompt has {len(prompt_ids)} tokens > max_model_len"}}, status_code=400)
@@ -1239,6 +1307,8 @@ index 0000000..fe88519
 +        include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
 +        # Non-standard request field: "prefix_cache": false bypasses the host prefix cache lookup (A/B checks).
 +        rid, q = fe.submit(prompt_ids, sampling, fe.affinity_key(body), use_cache=bool(body.get("prefix_cache", True)))
++        if fe.trace_file is not None:
++            fe.traces[rid] = {"rid": rid, "f_recv": t_recv, "f_json": t_json, "f_rendered": t_rendered, "f_submitted": time.time()}
 +        created = int(time.time())
 +        cid = f"chatcmpl-{rid}"
 +        detok = IncrementalDetokenizer(fe.tokenizer)
@@ -1262,6 +1332,8 @@ index 0000000..fe88519
 +                if item[0] == "error":
 +                    raise RuntimeError(item[1])
 +                _, token_id, finished, reason, _ = item
++                if detok.num_tokens == 0 and rid in fe.traces:
++                    fe.traces[rid]["f_first_token"] = time.time()
 +                text = detok.add(token_id)
 +                fe.stats["completion_tokens"] += 1
 +                if finished:
@@ -1283,6 +1355,8 @@ index 0000000..fe88519
 +                    yield chunk({"role": "assistant", "content": ""})
 +                    async for text, finish in tokens():
 +                        if text or finish:
++                            if rid in fe.traces and "f_first_sent" not in fe.traces[rid]:
++                                fe.traces[rid]["f_first_sent"] = time.time()
 +                            yield chunk({"content": text} if text else {}, finish)
 +                    done = True
 +                    if include_usage:
@@ -1290,6 +1364,7 @@ index 0000000..fe88519
 +                    yield "data: [DONE]\n\n"
 +                finally:
 +                    fe.release(rid, aborted=not done)
++                    fe.trace_done(rid)
 +
 +            return StreamingResponse(sse(), media_type="text/event-stream")
 +

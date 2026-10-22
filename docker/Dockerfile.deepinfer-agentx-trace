@@ -1,0 +1,7 @@
+# Thin layer over deepinfer:agentx-eplb: DEEPINFER_SERVER_TRACE per-request TTFT tracing (#17). Python-only.
+# Fresh builds from Dockerfile.deepinfer-agentx already include it (the full patch carries the same commit).
+#   docker build -f docker/Dockerfile.deepinfer-agentx-trace -t deepinfer:agentx-trace .
+ARG BASE=deepinfer:agentx-eplb
+FROM ${BASE}
+COPY patches/deepinfer-agentx-server-trace.patch /tmp/trace.patch
+RUN cd /workspace/DeepInfer && git apply /tmp/trace.patch && rm /tmp/trace.patch
