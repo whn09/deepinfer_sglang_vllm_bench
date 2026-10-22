@@ -68,6 +68,8 @@ for k,v in d.items():
     if v is False: continue
     print('--'+k)
     if v is not True: print(v)")
+        # 两个 router 同机时默认 Prometheus 端口会冲突（Address already in use）；第二个实例另给一个
+        [ -n "$SUF" ] && RARGS+=(--prometheus-port $((RPORT + 29)))
         docker rm -f "bench-router$SUF" > /dev/null 2>&1 || true
         docker run -d --name "bench-router$SUF" --network host "$IMAGE" \
             python3 -m sglang_router.launch_router --worker-urls "http://127.0.0.1:$PORT" \
