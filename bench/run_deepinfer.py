@@ -67,6 +67,15 @@ p.add_argument(
     "引擎默认 100 会给每个请求加一个 ~0.5-1.5s 的 TTFT 下限（以 decode 吞吐换 TTFT）；对齐服务端行为用 2，"
     "见 deepseek-ai/DeepInfer#147 和本仓库 #6",
 )
+p.add_argument(
+    "--yoco-keep-tokens",
+    type=int,
+    default=140,
+    help="YoCo prefill 截断（DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE=compact）保留的末尾 token 数；0 = 关。"
+    "V4.1 是 YoCo checkpoint（n_prefill_layer=20 / 40）：consumer 层的 prefill 只需算最后 KEEP 个 token，"
+    "KEEP >= 滑窗 128 + 回溯时与不截断等价。DeepInfer 自己的长上下文 benchmark 和 #147 的 server 默认都开（#16）",
+)
+p.add_argument("--dump-tokens", action="store_true", help="把每个请求的输出 token ids 写进逐请求记录（用于对比开/关某个优化时输出是否一致）")
 p.add_argument("--log-interval", type=int, default=50, help="引擎日志间隔（step），日志里有 avg_nextn_accept_rate（引擎自报的投机接受率）；0 关闭")
 p.add_argument("--note", default="")
 args = p.parse_args()
@@ -112,6 +121,12 @@ def max_model_len_for_plan() -> int:
 def rank_main(dp_size: int, dp_rank: int) -> None:
     os.environ["DEEPINFER_USE_NEXTN_DECODE"] = str(args.nextn)
     os.environ["DEEPINFER_PREFILL_ANY_ATTEMPT_INTERVAL"] = str(args.prefill_any_interval)
+    if args.yoco_keep_tokens > 0:
+        os.environ["DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE"] = "compact"
+        os.environ["DEEPINFER_YOCO_PREFILL_KEEP_TOKENS"] = str(args.yoco_keep_tokens)
+        os.environ["DEEPINFER_PREFILL_STORE_EXTRA_STATE"] = "1"
+    else:
+        os.environ["DEEPINFER_YOCO_PREFILL_TRUNCATION_MODE"] = "off"
     os.environ["DEVICE_OFFSET"] = str(args.device_offset)
 
     from _config import create_llm, setup_common_env
@@ -178,6 +193,7 @@ def rank_main(dp_size: int, dp_rank: int) -> None:
                     "output_len": 0,
                     "accept_tok": 0,
                     "draft_tok": 0,
+                    **({"tokens": []} if args.dump_tokens else {}),
                     "error": None,
                 }
             unfinished = engine.has_unfinished_requests()  # 跨 rank all_reduce，每个 rank 每轮都要调
@@ -192,6 +208,8 @@ def rank_main(dp_size: int, dp_rank: int) -> None:
                     continue
                 per_req[out.request_id] = per_req.get(out.request_id, 0) + 1
                 rec["accept_tok"] += int(out.accept_tok)
+                if args.dump_tokens:
+                    rec["tokens"].append(int(out.token_id))
                 rec["draft_tok"] += int(out.draft_tok)
                 if out.finished:
                     finished.append(out.request_id)
@@ -262,6 +280,7 @@ def merge_and_report() -> None:
                 "enable_eplb": args.enable_eplb,
                 "sampler_force_topk": args.sampler_force_topk,
                 "prefill_any_interval": args.prefill_any_interval,
+                "yoco_keep_tokens": args.yoco_keep_tokens,
             },
             "note": args.note,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
