@@ -10,5 +10,6 @@ COPY ${PATCH} /tmp/agentx.patch
 # #144 adds a Sequence.block_table binding, so deepinfer._C is rebuilt; FastAPI/uvicorn come from requirements-dev.txt
 RUN cd /workspace/DeepInfer && git apply /tmp/agentx.patch && rm /tmp/agentx.patch \
     && bash scripts/build.sh build > /tmp/deepinfer_c_build.log 2>&1 || (tail -40 /tmp/deepinfer_c_build.log; exit 1)
-# pd_server.py (#197) CE frontend calls the PE over HTTP
-RUN /opt/venv/bin/pip install -q httpx
+# pd_server.py (#197): the CE frontend calls the PE over HTTP; --kv-transport mooncake needs the Transfer Engine
+# (deps: aiohttp/requests/msgpack only, torch untouched)
+RUN /opt/venv/bin/pip install -q httpx mooncake-transfer-engine-cuda13==0.3.13.post1
