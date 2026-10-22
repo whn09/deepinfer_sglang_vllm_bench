@@ -7,7 +7,7 @@
 #          DI_HICACHE_GB（每 rank 主机前缀缓存，默认 32；0 = 关）、DI_ROUTING（sticky-balanced|affinity|least-loaded，
 #          默认 sticky-balanced：哈希亲和在会话少时会让 DP rank 负载严重不均）、DI_EXTRA（追加给 openai_server.py 的参数）、
 #          DI_IMAGE（默认 deepinfer:agentx；EPLB 开关要 deepinfer:agentx-eplb 或重新构建的 agentx）、
-#          DI_TRACE（主机上的 jsonl 路径：开 DEEPINFER_SERVER_TRACE 逐请求 TTFT 埋点，要 deepinfer:agentx-trace，#17）
+#          DI_TOKENIZE_VERIFY（前 N 条请求对比并行/整段 tokenize，要 deepinfer:agentx-tok）、DI_TRACE（主机上的 jsonl 路径：开 DEEPINFER_SERVER_TRACE 逐请求 TTFT 埋点，要 deepinfer:agentx-trace，#17）
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 HALF="${HALF:-a}"
@@ -21,7 +21,7 @@ TRACE_ARGS=(); [ -n "${DI_TRACE:-}" ] && TRACE_ARGS=(-e "DEEPINFER_SERVER_TRACE=
 docker run -d --name "$NAME" --gpus all --privileged --ipc=host --network host --shm-size 32g --ulimit memlock=-1 \
     -e DEVICE_OFFSET=$OFFSET -e MASTER_PORT=$MPORT \
     -e NCCL_GIN_TYPE=5 -e "NCCL_IB_HCA=^=ibp115s0f0,ibp116s0f0" \
-    -e DEEPINFER_USE_NEXTN_DECODE=5 -e DEEPINFER_SIMULATE_ACC_LEN="$AL" \
+    -e DEEPINFER_USE_NEXTN_DECODE=5 -e DEEPINFER_SIMULATE_ACC_LEN="$AL" -e DEEPINFER_TOKENIZE_VERIFY="${DI_TOKENIZE_VERIFY:-0}" \
     -e DEEPINFER_HF_MODEL_DIR=/model -v "$MODEL_DIR":/model:ro "${TRACE_ARGS[@]}" \
     "${DI_IMAGE:-deepinfer:agentx}" python -u serve/openai_server.py --model /model --served-model-name "$SERVED_MODEL_NAME" \
         --dp 4 --port "$PORT" --thinking-mode "${DI_THINKING:-thinking}" --hicache-size-gb "${DI_HICACHE_GB:-32}" \

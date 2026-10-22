@@ -1,0 +1,56 @@
+diff --git a/serve/openai_server.py b/serve/openai_server.py
+index b40e6e9..d9ed28c 100644
+--- a/serve/openai_server.py
++++ b/serve/openai_server.py
+@@ -21,6 +21,7 @@ import json
+ import multiprocessing as mp
+ import os
+ import queue
++import re
+ import sys
+ import threading
+ import time
+@@ -331,6 +332,17 @@ class Frontend:
+         self.model_name = args.served_model_name or args.model
+         self.encode_messages = encode_messages
+         self.tokenizer = AutoTokenizer.from_pretrained(args.model)
++        # Exact parallel tokenization: HF tokenizers split the input at added/special tokens before running the
++        # model, so encoding the pieces between them in one encode_batch call (multi-threaded in Rust) yields the
++        # same ids as encode() on the whole prompt. A 167K-token agentic prompt: 250 ms -> 77 ms.
++        added = sorted(self.tokenizer.get_added_vocab(), key=len, reverse=True)
++        self._special_split = re.compile("(" + "|".join(re.escape(t) for t in added) + ")") if added else None
++        probe = "<｜begin▁of▁sentence｜>hello <｜User｜>world  x\n<｜Assistant｜></think>ok"
++        if self._special_split is not None and self._encode(probe) != self.tokenizer.encode(probe, add_special_tokens=False):
++            print("[server] parallel tokenization mismatch on the probe, falling back to tokenizer.encode", flush=True)
++            self._special_split = None
++        # DEEPINFER_TOKENIZE_VERIFY=N: also run tokenizer.encode on the first N real prompts and compare
++        self._verify_left = int(os.environ.get("DEEPINFER_TOKENIZE_VERIFY", "0"))
+         ctx = mp.get_context("spawn")
+         self.out_q: mp.Queue = ctx.Queue()
+         self.in_qs: list[mp.Queue] = [ctx.Queue() for _ in range(args.dp)]
+@@ -422,7 +434,24 @@ class Frontend:
+             if body.get("tools"):
+                 parts.insert(1, json.dumps(body["tools"], ensure_ascii=False))
+             prompt = "".join(parts) + "<｜Assistant｜></think>"
+-        return self.tokenizer.encode(prompt, add_special_tokens=False)
++        ids = self._encode(prompt)
++        if self._verify_left > 0 and self._special_split is not None:
++            self._verify_left -= 1
++            ref = self.tokenizer.encode(prompt, add_special_tokens=False)
++            if ref != ids:
++                print(f"[server] parallel tokenization MISMATCH ({len(ids)} vs {len(ref)} ids); falling back", flush=True)
++                self._special_split = None
++                return ref
++            if self._verify_left == 0:
++                print("[server] parallel tokenization verified on real prompts", flush=True)
++        return ids
++
++    def _encode(self, text: str) -> list[int]:
++        if self._special_split is None:
++            return self.tokenizer.encode(text, add_special_tokens=False)
++        parts = [p for p in self._special_split.split(text) if p]
++        enc = self.tokenizer.backend_tokenizer.encode_batch(parts, add_special_tokens=False)
++        return [i for e in enc for i in e.ids]
+ 
+     @staticmethod
+     def affinity_key(body: dict) -> bytes | None:
