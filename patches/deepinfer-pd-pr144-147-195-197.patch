@@ -641,10 +641,10 @@ index 0000000..a445421
 +}
 diff --git a/deepinfer/hicache/pd_mooncake.py b/deepinfer/hicache/pd_mooncake.py
 new file mode 100644
-index 0000000..f77b597
+index 0000000..5a0968e
 --- /dev/null
 +++ b/deepinfer/hicache/pd_mooncake.py
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,124 @@
 +"""Mooncake Transfer Engine data plane for the prefill/decode split (serve/pd_server.py --kv-transport mooncake).
 +
 +Each engine rank registers one GPU arena with a Mooncake TransferEngine. The prefill engine exports a sequence
@@ -657,6 +657,7 @@ index 0000000..f77b597
 +
 +from __future__ import annotations
 +
++import ctypes
 +import os
 +import threading
 +
@@ -674,7 +675,19 @@ index 0000000..f77b597
 +
 +    def __init__(self, nbytes: int, device: torch.device) -> None:
 +        self.nbytes = _align(nbytes)
-+        self.buf = torch.empty(self.nbytes, dtype=torch.uint8, device=device)
++        # Not torch.empty: the worker runs PyTorch with expandable_segments (worker/base.py), whose VMM memory has no
++        # cudaIpc handle, and Mooncake's nvlink_intra transport registers buffers with cudaIpcGetMemHandle. Use the
++        # same legacy cuMemAlloc path as the KV pools (CacheEngine._alloc_gpu_uint8).
++        try:
++            from deepinfer._C import cuda_utils  # pyright: ignore[reportMissingModuleSource]
++
++            raw = cuda_utils.alloc_tensor(self.nbytes)
++            if raw is None:
++                raise MemoryError(f"cuMemAlloc of a {self.nbytes >> 20} MiB PD arena failed (lower --pd-arena-gb)")
++            self.buf = raw.view(torch.uint8).reshape(-1)
++        except ImportError:  # outside a DeepInfer build (unit tests)
++            self.buf = torch.empty(self.nbytes, dtype=torch.uint8, device=device)
++        assert self.buf.numel() == self.nbytes, (self.buf.numel(), self.nbytes)
 +        self.base: int = self.buf.data_ptr()
 +        self._free: list[tuple[int, int]] = [(0, self.nbytes)]  # sorted, coalesced (offset, size)
 +        self._lock = threading.Lock()
@@ -708,6 +721,23 @@ index 0000000..f77b597
 +
 +    def view(self, off: int, n: int) -> torch.Tensor:
 +        return self.buf[off : off + n]
++
++
++def current_cuda_context() -> int:
++    """The calling thread's current CUcontext (driver API), to hand to helper threads."""
++    ctx = ctypes.c_void_p()
++    ctypes.CDLL("libcuda.so.1").cuCtxGetCurrent(ctypes.byref(ctx))
++    return ctx.value or 0
++
++
++def bind_cuda_context(ctx: int) -> None:
++    """Make `ctx` current on the calling thread. TransferEngine's nvlink_intra opens peer IPC handles on the calling
++    thread; a fresh Python thread has no current context (torch.cuda.set_device is a no-op when the device number
++    already matches), and cudaIpcOpenMemHandle then fails with "invalid device context"."""
++    if ctx:
++        rc = ctypes.CDLL("libcuda.so.1").cuCtxSetCurrent(ctypes.c_void_p(ctx))
++        if rc != 0:
++            raise RuntimeError(f"cuCtxSetCurrent failed: {rc}")
 +
 +
 +def region_layout(num_pages: int, page_bytes: int, state_bytes: int) -> tuple[int, int]:
@@ -1908,10 +1938,10 @@ index 0000000..f61a451
 +esac
 diff --git a/serve/pd_server.py b/serve/pd_server.py
 new file mode 100644
-index 0000000..0157bd5
+index 0000000..92793ba
 --- /dev/null
 +++ b/serve/pd_server.py
-@@ -0,0 +1,811 @@
+@@ -0,0 +1,825 @@
 +"""Prefill/decode-disaggregated serving: a prompt-only engine tray (PE) and a decode-only engine tray (CE).
 +
 +    # decode tray (user-facing OpenAI API on --port, KV receivers on --kv-port + rank):
@@ -1965,6 +1995,7 @@ index 0000000..0157bd5
 +# after the TransferEngine write the PE sends b"go" (or b"xx" on failure) and the CE answers b"ok".
 +MC_MAGIC = b"MCK1"  # cannot start a TCP-path header (rids are hex)
 +MC_RETRY_S = 0.005
++MC_WRITE_ATTEMPTS = 3  # then fall back to TCP for that transfer, so a failing peer never strands a request
 +
 +
 +def _mooncake_link(args: argparse.Namespace, device):  # noqa: ANN001, ANN202
@@ -2112,6 +2143,10 @@ index 0000000..0157bd5
 +        cache = HostPrefixCache(engine, size_bytes=int(args.hicache_size_gb * 2**30), num_state_slots=args.hicache_state_slots)
 +
 +    link = _mooncake_link(args, transfer.device) if args.kv_transport == "mooncake" else None
++    if link is not None:
++        from deepinfer.hicache.pd_mooncake import current_cuda_context
++
++        engine_ctx = current_cuda_context()  # the engine thread's context, for the sender thread
 +    targets: dict[str, tuple[str, int]] = {}  # rid -> (host, port) of the CE rank
 +    awaiting_token: dict[str, dict] = {}  # rid -> transfer waiting for the step's sampled first token
 +    send_q: queue.Queue = queue.Queue()
@@ -2171,25 +2206,30 @@ index 0000000..0157bd5
 +                s.sendall(hdr)
 +                resv = json.loads(_recv_line(s))
 +                if resv["status"] == "ok":
-+                    try:
-+                        link.write(resv["segment"], off, resv["addr"], total)
-+                    except Exception:
++                    for attempt in range(MC_WRITE_ATTEMPTS):
++                        try:
++                            link.write(resv["segment"], off, resv["addr"], total)
++                            break
++                        except Exception as e:  # noqa: BLE001
++                            print(f"[pe rank {dp_rank}] mooncake write to {resv['segment']} failed (attempt {attempt + 1}): {e!r}", flush=True)
++                            time.sleep(0.01 * (attempt + 1))
++                    else:
 +                        s.sendall(b"xx")
-+                        raise
++                        return False  # caller falls back to TCP
 +                    s.sendall(b"go")
 +                    ack = s.recv(2)
 +                    if ack != b"ok":
 +                        raise RuntimeError(f"CE rejected transfer: {ack!r}")
-+                    return
++                    return True
 +                if resv["status"] != "busy" or time.monotonic() > deadline:
 +                    raise RuntimeError(f"CE reservation failed: {resv}")
 +            time.sleep(MC_RETRY_S)  # CE arena full: retry once it has admitted something
 +
 +    def sender():
 +        if link is not None:
-+            import torch
++            from deepinfer.hicache.pd_mooncake import bind_cuda_context
 +
-+            torch.cuda.set_device(transfer.device)  # TransferEngine copies use the calling thread's device
++            bind_cuda_context(engine_ctx)  # TransferEngine opens peer IPC handles on the calling thread
 +        while True:
 +            rid, item = send_q.get()
 +            host, port = item["target"]
@@ -2200,10 +2240,14 @@ index 0000000..0157bd5
 +                item["event"].synchronize()
 +                if item["region"] is not None:
 +                    try:
-+                        send_mooncake(rid, item, host, port)
++                        sent = send_mooncake(rid, item, host, port)
++                        if not sent:  # copy the region to pinned host buffers and use the TCP path below
++                            item["pages"] = item["pages"].to("cpu").pin_memory()
++                            item["state"] = item["state"].to("cpu").pin_memory()
 +                    finally:
 +                        link.arena.release(*item["region"])
-+                    continue
++                    if sent:
++                        continue
 +                pages, state = item["pages"], item["state"]
 +                with socket.create_connection((host, port), timeout=60) as s:
 +                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
