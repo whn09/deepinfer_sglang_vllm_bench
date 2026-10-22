@@ -1,0 +1,7 @@
+# Thin layer over deepinfer:agentx: server flags --eplb-interval / --eplb-after-prefill (#5). Python-only, no _C rebuild.
+# Fresh builds from Dockerfile.deepinfer-agentx already include it (the full patch carries the same commit).
+#   docker build -f docker/Dockerfile.deepinfer-agentx-eplb -t deepinfer:agentx-eplb .
+ARG BASE=deepinfer:agentx
+FROM ${BASE}
+COPY patches/deepinfer-agentx-eplb-flags.patch /tmp/eplb.patch
+RUN cd /workspace/DeepInfer && git apply /tmp/eplb.patch && rm /tmp/eplb.patch
