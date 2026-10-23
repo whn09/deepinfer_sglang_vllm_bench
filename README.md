@@ -28,7 +28,7 @@ This repo compares three inference stacks serving `DeepSeek-V4.1-Flash-1017` on 
 | DeepInfer TTFT breakdown and fix | #17 | done, upstreamed |
 | YoCo truncation (lossless?) | #16 | keep=140 changes greedy outputs; quality eval open |
 | PD split 4P+4D, Mooncake NVLink transport | #18 | done: Mooncake = TCP (identical outputs, same perf); #214 ready for review |
-| Mooncake Store as L3 under the prefix cache | #20 | correct per request; TRANSFER_FAIL under multi-process TCP load, investigating |
+| Mooncake Store as L3 under the prefix cache | #20 | works under load with Mooncake main: 0.3.13 TCP queue-full was the failure; with least-loaded routing L3 gives 1.36× throughput, 1.93× interactivity ([details](results/20261023_agentx/l3_mooncake_main.md)) |
 | Mooncake `nvlink_intra` VMM buffers | #19 | brief for a separate agent |
 | Final report | #7 | interim snapshot |
 
@@ -41,6 +41,7 @@ DeepInfer's open-source release is offline-only, so the AgentX runs use upstream
 | `deepinfer:efa-b5a7378` | DeepInfer @ 774ce24 + EFA installer + aws-ofi-nccl + `whn09/DeepEP@b5a7378` (Engram over NCCL GIN on EFA, #10) |
 | `deepinfer:agentx-v2` | + upstream #144 (host prefix cache) and #147 (OpenAI server, EPLB off, `--tokenizer-backend`) + ours: synthetic acceptance length (InferenceX golden AL), sticky-balanced DP routing, per-request TTFT tracing |
 | `deepinfer:agentx-l3` | + Mooncake Store L3 under the prefix cache (#20, upstream draft #216) |
+| `deepinfer:agentx-l3-mcmain` | same, with Mooncake built from main instead of the 0.3.13.post1 wheel (`docker/Dockerfile.mooncake-main`) |
 | `deepinfer:pd` | upstream #195 + #197 (PD split) + Mooncake Transfer Engine KV transport (#18, upstream draft #214) |
 
 ## Reproduce
@@ -66,7 +67,7 @@ DI_KV_TRANSPORT=mooncake bash scripts/serve_deepinfer_pd.sh
 python3 bench/pd_parity.py --port 8888 --out mooncake.json                  # greedy output fingerprints
 
 # Prefix cache with a Mooncake Store L3
-bash scripts/serve_mooncake_store.sh && DI_IMAGE=deepinfer:agentx-l3 DI_L3=1 bash scripts/serve_deepinfer_agentx.sh
+DI_IMAGE=deepinfer:agentx-l3-mcmain bash scripts/serve_mooncake_store.sh && DI_IMAGE=deepinfer:agentx-l3-mcmain DI_L3=1 bash scripts/serve_deepinfer_agentx.sh
 
 # Report: tables + Pareto and TTFT-by-concurrency plots (InferenceX's own metric code)
 python bench/agentx_report.py results/b200_live/results/agentx --series "DeepInfer=deepinfer-ix-ep4-noeplb-fastok:dep4" \
