@@ -44,12 +44,12 @@ bash scripts/serve_sglang.sh ref           # or serve_vllm.sh ref
 bash scripts/run_agentx.sh sglang sglang-ref 8 32
 ```
 
-- `run_agentx.sh` creates a dedicated venv at `$WORK/agentx-venv` and installs `agentx-harness==1.0.7` (it bundles a forked aiperf, so it must not share an environment). It needs Python 3.11–3.13; the `/opt/pytorch` venv that `env.sh` activates is 3.13, the system 3.14 is not supported.
+- `run_agentx.sh` creates a dedicated venv at `$WORK/agentx-venv` and installs `agentx-harness==1.0.12` (the version InferenceX pins in `infx/bench/agentic/requirements.txt`) (it bundles a forked aiperf, so it must not share an environment). It needs Python 3.11–3.13; the `/opt/pytorch` venv that `env.sh` activates is 3.13, the system 3.14 is not supported.
 - The corpus defaults to the date-pinned `semianalysis_cc_traces_weka_062126`; do not use the rolling `..._with_subagents` alias (runs on different drops are not comparable).
 - Results land in `$RESULTS_DIR/agentx/<config>/c<concurrency>/`; check `submission_valid` in `profile_export_aiperf.json`.
 - For a quick smoke, `AGENTX_EXTRA_ARGS="--benchmark-duration 600"` — but such a run is not a valid submission and cannot be compared with published numbers.
 - The model's max context is 1M (`max_position_embeddings 1048576`) and the corpus has requests over 256k. If the server is configured for less, pass `--max-context-length <value>` or use the `_256k` corpus variant; otherwise over-length requests fail server-side and more than 1% of them makes `submission_valid=false`.
-- The current `serve_*.sh` `ref` / `tp8` profiles are not yet the InferenceX recipes; porting them (`ix-*` profiles) is part of #4.
+- InferenceX-aligned servers come from `scripts/serve_ix.sh`, which expands InferenceX's own `agentic.yaml` per concurrency (`bench/ix_recipe.py`); the older `serve_*.sh` `ref` / `tp8` profiles are for the fixed-length runs.
 
 <details><summary>中文</summary>
 
@@ -87,11 +87,11 @@ DeepInfer 开源版缺 AgentX 需要的东西（`README.md` 写明 "not included
 
 命令见上方英文部分。
 
-- `run_agentx.sh` 会在 `$WORK/agentx-venv` 建独立 venv，安装 `agentx-harness==1.0.7`（它带的是 fork 版 aiperf，不能和别的环境混装）。需要 Python 3.11–3.13：`env.sh` 激活的 `/opt/pytorch` venv 是 3.13，可以用；系统自带的 3.14 不行。
+- `run_agentx.sh` 会在 `$WORK/agentx-venv` 建独立 venv，安装 `agentx-harness==1.0.12` (the version InferenceX pins in `infx/bench/agentic/requirements.txt`)（它带的是 fork 版 aiperf，不能和别的环境混装）。需要 Python 3.11–3.13：`env.sh` 激活的 `/opt/pytorch` venv 是 3.13，可以用；系统自带的 3.14 不行。
 - 语料默认用钉日期的 `semianalysis_cc_traces_weka_062126`，不要用滚动别名 `..._with_subagents`（不同批次的结果不可比）。
 - 结果在 `$RESULTS_DIR/agentx/<config>/c<并发>/`，看 `profile_export_aiperf.json` 里的 `submission_valid`。
 - 快速冒烟可以用 `AGENTX_EXTRA_ARGS="--benchmark-duration 600"`，但这样不是有效提交，不能和公开数字比。
 - 模型最大上下文是 1M（`max_position_embeddings 1048576`），语料里有超过 256k 的请求。如果 server 配的上下文更短，要么加 `--max-context-length <值>`，要么换 `_256k` 版本的语料；否则超长请求会在 server 端失败，超过 1% 就会 `submission_valid=false`。
-- 目前 `serve_*.sh` 的 `ref` / `tp8` 档还不是 InferenceX 的 recipe；把它们移植成 `ix-*` 档是 #4 的一部分。
+- 与 InferenceX 对齐的 server 由 `scripts/serve_ix.sh` 启动，它会按并发点展开 InferenceX 自己的 `agentic.yaml`（`bench/ix_recipe.py`）；旧的 `serve_*.sh` `ref` / `tp8` 档用于定长测试。
 
 </details>

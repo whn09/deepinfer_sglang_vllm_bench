@@ -1,147 +1,170 @@
 # DeepInfer vs SGLang vs vLLM: DeepSeek-V4.1-Flash on B200
 
-Compare three inference stacks serving `DeepSeek-V4.1-Flash` on one 8×B200 box — same weights, same inputs, same metrics — in a way that can be checked against the public [InferenceX](https://inferencex.semianalysis.com/inference/deepseek-v41-flash?i_xmode=interactivity&i_seq=agentic-traces&i_prec=fp8) benchmark.
+This repo compares three inference stacks serving `DeepSeek-V4.1-Flash-1017` on one 8×B200 box: same weights, same inputs, same metrics. The primary workload is the [InferenceX](https://inferencex.semianalysis.com/inference/deepseek-v41-flash?i_xmode=interactivity&i_seq=agentic-traces&i_prec=fp8) **AgentX** benchmark, and we first reproduce the published B200 points before comparing anything.
 
-**Roadmap and status: [#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8).** So far only the DeepInfer smoke test has run (`results/20261021_smoke_deepinfer/`); the SGLang/vLLM paths have not been exercised yet.
+**Roadmap and status: [#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8).** **Latest results: [`results/20261023_agentx/summary.md`](results/20261023_agentx/summary.md).**
 
-## Two workloads
+## Results (AgentX, 4 GPUs per server, 3600 s per point)
 
-| | InferenceX AgentX (primary) | Fixed-length closed loop |
+![pareto](results/20261023_agentx/agentx_pareto.png)
+![ttft](results/20261023_agentx/agentx_ttft.png)
+
+- **The reproduction matches InferenceX.** Our vLLM TP4 runs match all 7 published points (throughput 0.95–1.02×). Our SGLang runs match all 12 published points (0.98–1.06×), including DEP4 + HiCache.
+- **DeepInfer with the #147 server defaults was 2–5× behind** because EPLB rearrangement was hard-wired on (#5). It is fixed upstream (EPLB off by default).
+- **DeepInfer TTFT was 3–4× vLLM's** because HF `tokenizers` re-encoded the whole conversation on every turn (#17). With `fastokens`, as vLLM's Rust frontend uses, it is within 10–40 ms of vLLM. This is now upstream in #147 as `--tokenizer-backend`.
+- **DeepInfer today**, vs vLLM TP4:
+  - throughput 0.97–0.98× at c ≥ 16;
+  - interactivity 0.62–0.76× at c ≤ 16 (DP attention gives one request one GPU) and 0.92–0.95× at c ≥ 64.
+- **SGLang** has the highest throughput at high concurrency, but its TTFT is 1.3–1.6 s on the DEP4 points.
+- **DeepInfer PD 4P+4D** (8 GPUs, #18) gives the best per-user speed at c ≥ 64, at about half the throughput per GPU.
+
+## Status
+
+| Track | Issue | State |
 |---|---|---|
-| Who | SGLang, vLLM; DeepInfer after #5 | DeepInfer, SGLang, vLLM |
-| Load | Real coding-agent traces: multi-turn, long context, cross-request prefix reuse | Fixed input/output length, no prefix reuse, closed-loop concurrency 1–128 |
-| Why | Comparable to the published B200 points | Controlled engine-level comparison; the only one DeepInfer can join today |
-| Docs | `docs/agentx.md` | `docs/fairness.md` |
+| Reproduce InferenceX AgentX (vLLM, SGLang) | #4 | done (19/19 points) |
+| DeepInfer on AgentX (OpenAI server, routing, prefix cache, synthetic acceptance) | #5 | done; headline `deepinfer-ix-ep4-noeplb-fastok` |
+| Fixed-length closed-loop comparison | #6 | sg-1k/8k/32k done |
+| DeepInfer TTFT breakdown and fix | #17 | done, upstreamed |
+| YoCo truncation (lossless?) | #16 | keep=140 changes greedy outputs; quality eval open |
+| PD split 4P+4D, Mooncake NVLink transport | #18 | TCP done; Mooncake short parity check running |
+| Mooncake Store as L3 under the prefix cache | #20 | implemented, E2E validation queued |
+| Mooncake `nvlink_intra` VMM buffers | #19 | brief for a separate agent |
+| Final report | #7 | interim snapshot |
 
-DeepInfer's open-source release is offline-only: no HTTP server, no cross-request KV cache, no DP load balancing. Getting it onto AgentX is tracked in #5.
+## How DeepInfer runs here
+
+DeepInfer's open-source release is offline-only, so the AgentX runs use upstream PRs plus a few patches of ours. All of them are in [`patches/`](patches), and each is built as a Docker image ([`docker/`](docker)):
+
+| Image | Contents |
+|---|---|
+| `deepinfer:efa-b5a7378` | DeepInfer @ 774ce24 + EFA installer + aws-ofi-nccl + `whn09/DeepEP@b5a7378` (Engram over NCCL GIN on EFA, #10) |
+| `deepinfer:agentx-v2` | + upstream #144 (host prefix cache) and #147 (OpenAI server, EPLB off, `--tokenizer-backend`) + ours: synthetic acceptance length (InferenceX golden AL), sticky-balanced DP routing, per-request TTFT tracing |
+| `deepinfer:agentx-l3` | + Mooncake Store L3 under the prefix cache (#20, upstream draft #216) |
+| `deepinfer:pd` | upstream #195 + #197 (PD split) + Mooncake Transfer Engine KV transport (#18, upstream draft #214) |
+
+## Reproduce
+
+The B200 host is not fixed. Everything lives under `/opt/dlami/nvme/bench_tmp` (`$WORK`, set in `scripts/env.sh`). `scripts/sync_from_host.sh` pulls results back periodically; delete the remote directory when done.
+
+```bash
+rsync -av --exclude results --exclude .git ./ B200-1:/opt/dlami/nvme/bench_tmp/repo/   # local -> host
+ssh B200-1 && cd /opt/dlami/nvme/bench_tmp/repo && source scripts/env.sh
+
+# AgentX, vLLM / SGLang: one fresh server per concurrency from InferenceX's own recipe (bench/ix_recipe.py)
+bash scripts/serve_ix.sh vllm 64
+IX_JSON=$WORK/logs/ix_vllm_c64.json bash scripts/run_agentx.sh vllm vllm-ix-tp4 4 tp4 64
+bash scripts/serve_ix.sh sglang 128                    # DEP4 + HiCache + sglang-router, as published
+IX_JSON=$WORK/logs/ix_sglang_c128.json bash scripts/run_agentx.sh sglang sglang-ix 4 dep4 128
+
+# AgentX, DeepInfer (EP4 = 4 DP ranks, synthetic AL 3.51, host prefix cache)
+DI_IMAGE=deepinfer:agentx-v2 bash scripts/serve_deepinfer_agentx.sh          # HALF=b for GPUs 4-7
+PUBLISHED_AS=vllm bash scripts/run_agentx.sh deepinfer deepinfer-ix-ep4 4 tp4 64
+
+# PD split, PE on GPUs 0-3 + CE on GPUs 4-7 (DI_KV_TRANSPORT=tcp|mooncake)
+DI_KV_TRANSPORT=mooncake bash scripts/serve_deepinfer_pd.sh
+python3 bench/pd_parity.py --port 8888 --out mooncake.json                  # greedy output fingerprints
+
+# Prefix cache with a Mooncake Store L3
+bash scripts/serve_mooncake_store.sh && DI_IMAGE=deepinfer:agentx-l3 DI_L3=1 bash scripts/serve_deepinfer_agentx.sh
+
+# Report: tables + Pareto and TTFT-by-concurrency plots (InferenceX's own metric code)
+python bench/agentx_report.py results/b200_live/results/agentx --series "DeepInfer=deepinfer-ix-ep4-noeplb-fastok:dep4" \
+    --published "vLLM (InferenceX)=results/inferencex_public/dsv41flash_b200_vllm_agentic.json" --out-dir results/<run>
+```
+
+Fixed-length closed loop (`docs/fairness.md`): `scripts/sweep_deepinfer.sh` drives the offline engine, and `serve_sglang.sh` / `serve_vllm.sh` + `sweep_server.sh` drive the servers. Scenarios are in `scripts/scenarios.sh`, and `bench/summarize.py` builds the tables.
+
+**Host pitfalls we hit.**
+- `--privileged` containers ignore `--gpus device=`.
+- Parallel servers of the same stack need distinct internal ports.
+- `--ipc=host` containers leak `/dev/shm` segments when killed (`scripts/clean_orphan_shm.sh`).
+- Cross-container CUDA IPC needs `--pid=host`.
+- An unattended upgrade can restart Fabric Manager mid-run; recover with stop FM → `nvidia-smi -r` → start FM.
+
+Details are in the issues and `docs/`.
+
+## Upstream contributions
+
+- **deepseek-ai/DeepInfer**
+  - #147: EPLB stalls ([comment](https://github.com/deepseek-ai/DeepInfer/pull/147#issuecomment-6334191794)) and fast prompt tokenization ([comment](https://github.com/deepseek-ai/DeepInfer/pull/147#issuecomment-6355311603)). Both were adopted in d7844a2 and 269a61f.
+  - [#214](https://github.com/deepseek-ai/DeepInfer/pull/214): Mooncake KV transport for the PD split.
+  - [#216](https://github.com/deepseek-ai/DeepInfer/pull/216): Mooncake Store L3 for the prefix cache.
+- **kvcache-ai/Mooncake**
+  - [#4873](https://github.com/kvcache-ai/Mooncake/pull/4873): nvlink_intra diagnostics for VMM buffers and PID namespaces.
+  - [#4803 comment](https://github.com/kvcache-ai/Mooncake/issues/4803#issuecomment-6360317607): DeepInfer as a consumer of the per-sequence state contract.
+- Drafts and posted texts are kept in [`docs/upstream/`](docs/upstream).
 
 ## Layout
 
 ```
 bench/
-  common.py          dataset / record format + metric computation (shared)
-  make_dataset.py    fixed-length request files as token ids (random or ShareGPT text)
-  client_openai.py   SGLang / vLLM client: streaming /v1/completions, closed-loop concurrency
-  run_deepinfer.py   DeepInfer driver: LLMEngine directly, same closed-loop semantics
-  summarize.py       markdown tables + throughput-vs-interactivity Pareto plots
+  common.py, make_dataset.py, client_openai.py, run_deepinfer.py, summarize.py   fixed-length harness
+  ix_recipe.py        expand InferenceX agentic.yaml into server args / env for one concurrency
+  agentx_metrics.py   metrics with InferenceX's own code, compared with the published point
+  agentx_report.py    AgentX table + Pareto and TTFT plots across configs
+  ttft_breakdown.py   per-stage TTFT from DeepInfer server tracing (#17)
+  render_bench.py, fastokens_bench.py   tokenizer microbenchmarks (#17)
+  pd_parity.py        greedy output fingerprints for transport A/B (#18)
+  mc_*_probe.py, cuda_probes/          Mooncake / CUDA IPC / VMM probes (#18, #19)
 scripts/
-  env.sh             every path and the DeepInfer environment (edit this when the host changes)
-  scenarios.sh       scenarios (input/output length) and concurrency points
-  make_datasets.sh   per-concurrency datasets for one scenario
-  serve_sglang.sh    SGLang server (ref / ref-nospec / tp8 / tp8-nospec)
-  serve_vllm.sh      vLLM server (ref / ref-spec / tp8 / tp8-spec)
-  sweep_server.sh    sweep one scenario against a running server
-  sweep_deepinfer.sh sweep one scenario on DeepInfer
-  run_agentx.sh      InferenceX AgentX against SGLang / vLLM
-  stop_servers.sh    stop server containers, free the GPUs
-  pull_results.sh    (run locally) pull results into results/, optionally wipe the remote temp dir
-docs/
-  setup_deepinfer.md   DeepInfer build and model download, with every pitfall we hit
-  fairness.md          fair-comparison rules and metric definitions  <- read first
-  reference_configs.md official reference commands and how the three configs differ
-  agentx.md            InferenceX AgentX and what it takes to run DeepInfer on it
-results/               pulled-back results, one directory per run
+  env.sh                 every path and the DeepInfer environment
+  serve_ix.sh            vLLM / SGLang server (+ router) from the InferenceX recipe
+  serve_deepinfer_agentx.sh, serve_deepinfer_pd.sh, serve_mooncake_store.sh
+  serve_sglang.sh, serve_vllm.sh, sweep_*.sh, scenarios.sh, make_datasets.sh   fixed-length
+  run_agentx.sh          AgentX (agentx-harness 1.0.12) against any of the servers
+  sync_from_host.sh, pull_results.sh, clean_orphan_shm.sh, wait_*.sh, stop_servers.sh
+docker/    image definitions (see the table above)
+patches/   DeepInfer patch stacks used by the images
+docs/      setup_deepinfer.md, fairness.md (read first), reference_configs.md, agentx.md, upstream/
+results/   one directory per run; inferencex_public/ = published InferenceX points; b200_live/ = synced, git-ignored
 ```
-
-## Quick start (fixed-length)
-
-The B200 host is not fixed. Everything lives under `/opt/dlami/nvme/bench_tmp` (`$WORK`); pull the results back and delete it afterwards.
-
-```bash
-# 0. local: sync the repo to the host's temp dir
-rsync -av --exclude results --exclude .git ./ B200-1:/opt/dlami/nvme/bench_tmp/repo/
-
-# 1. on the host: DeepInfer built per docs/setup_deepinfer.md, model downloaded
-ssh B200-1
-cd /opt/dlami/nvme/bench_tmp/repo && source scripts/env.sh
-
-# 2. DeepInfer (no server may hold the GPUs) — main comparison is 4 GPUs, like InferenceX
-bash scripts/stop_servers.sh
-bash scripts/sweep_deepinfer.sh deepinfer-ep4-nospec  4 0 sg-1k-1k
-bash scripts/sweep_deepinfer.sh deepinfer-ep4-dspark5 4 5 sg-1k-1k
-
-# 3. SGLang
-bash scripts/serve_sglang.sh tp4-nospec && bash scripts/sweep_server.sh sglang sglang-tp4-nospec 4 sg-1k-1k
-bash scripts/serve_sglang.sh tp4        && bash scripts/sweep_server.sh sglang sglang-tp4        4 sg-1k-1k
-bash scripts/stop_servers.sh
-
-# 4. vLLM
-bash scripts/serve_vllm.sh tp4      && bash scripts/sweep_server.sh vllm vllm-tp4      4 sg-1k-1k
-bash scripts/serve_vllm.sh tp4-spec && bash scripts/sweep_server.sh vllm vllm-tp4-spec 4 sg-1k-1k
-bash scripts/stop_servers.sh
-
-# 5. summarize
-python bench/summarize.py $RESULTS_DIR/results.jsonl
-
-# 6. local: pull results back and wipe the remote temp dir
-bash scripts/pull_results.sh B200-1 --clean
-```
-
-The 8-GPU supplement uses `tp8` and `deepinfer-ep8-*` (`sweep_deepinfer.sh ... 8 ...`). The official reference configs (tier A) use `ref`: SGLang `ref` is TP4/EP4 with CUDA graphs only up to bs 64; vLLM `ref` uses 2 GPUs with max-num-seqs 8, so restrict it to low concurrency with `CONCURRENCIES="1 2 4 8"`.
-
-AgentX: see `docs/agentx.md`.
 
 <details><summary>中文</summary>
 
 # DeepInfer vs SGLang vs vLLM：DeepSeek-V4.1-Flash 在 B200 上的对比
 
-在一台 8×B200 机器上对比三个推理框架运行 `DeepSeek-V4.1-Flash` 的表现：同一份权重、同一批输入、同一套指标，并且结果能和公开的 [InferenceX](https://inferencex.semianalysis.com/inference/deepseek-v41-flash?i_xmode=interactivity&i_seq=agentic-traces&i_prec=fp8) benchmark 核对。
+本仓库在一台 8×B200 上对比三个推理框架运行 `DeepSeek-V4.1-Flash-1017` 的表现：同一份权重、同一批输入、同一套指标。主要负载是 InferenceX 的 **AgentX** benchmark，比较之前先复现官方公布的 B200 数据点。
 
-**Roadmap 和进度：[#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8)。** 目前只跑过 DeepInfer 的冒烟测试（`results/20261021_smoke_deepinfer/`），SGLang/vLLM 这边还没跑过。
+**Roadmap 和进度：[#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8)。最新结果：[`results/20261023_agentx/summary.md`](results/20261023_agentx/summary.md)。**
 
-## 两种负载
+## 结果（AgentX，每个 server 4 卡，每点 3600 s）
 
-| | InferenceX AgentX（主线） | 定长闭环 |
-|---|---|---|
-| 参与者 | SGLang、vLLM；DeepInfer 在 #5 完成之后 | DeepInfer、SGLang、vLLM |
-| 负载 | 真实编程 agent 轨迹：多轮、长上下文、跨请求前缀复用 | 固定输入/输出长度、无前缀复用、闭环并发 1–128 |
-| 用途 | 能和公开的 B200 数据点比 | 受控的引擎级对比；也是 DeepInfer 目前唯一能参加的 |
-| 文档 | `docs/agentx.md` | `docs/fairness.md` |
+- **复现结果与 InferenceX 一致：** 我们跑的 vLLM TP4 与官方 7 个点全部对上（吞吐 0.95–1.02×）；SGLang 与官方 12 个点全部对上（0.98–1.06×），包括 DEP4 + HiCache。
+- **DeepInfer 用 #147 server 的默认配置时落后 2–5 倍：** 原因是 EPLB 重排被写死开启（#5）。上游已修复，现在默认关闭 EPLB。
+- **DeepInfer 的 TTFT 曾是 vLLM 的 3–4 倍：** 原因是每一轮都用 HF `tokenizers` 把整段对话重新编码（#17）。改用 vLLM Rust 前端同款的 `fastokens` 后，和 vLLM 只差 10–40 ms。这已经以 `--tokenizer-backend` 参数的形式合入上游 #147。
+- **DeepInfer 现状**（相对 vLLM TP4）：
+  - c ≥ 16 时吞吐 0.97–0.98×；
+  - interactivity 在 c ≤ 16 时为 0.62–0.76×（DP attention 下一个请求只用一张卡），c ≥ 64 时为 0.92–0.95×。
+- **SGLang：** 高并发下吞吐最高，但 DEP4 各点的 TTFT 有 1.3–1.6 s。
+- **DeepInfer PD 4P+4D**（8 卡，#18）：c ≥ 64 时每用户速度最快，代价是每卡吞吐约减半。
 
-DeepInfer 开源版只能离线推理：没有 HTTP server、没有跨请求 KV cache、没有 DP 负载均衡。让它跑 AgentX 的工作在 #5 跟踪。
+## 进展
+
+见上方英文表格，每一项对应一个 issue：复现（#4）、DeepInfer 跑 AgentX（#5）、定长对比（#6）、TTFT（#17）、YoCo（#16）、PD + Mooncake（#18）、Mooncake Store L3（#20）、VMM（#19）、最终报告（#7）。
+
+## DeepInfer 在这里怎么跑
+
+DeepInfer 开源版只能离线推理，所以跑 AgentX 用的是上游 PR 加上我们自己的几个补丁，全部放在 `patches/` 下，每套都构建成一个 Docker 镜像（`docker/`），对应关系见上方英文表格。
+
+## 复现
+
+B200 机器不固定，所有东西都放在 `/opt/dlami/nvme/bench_tmp`（`$WORK`，在 `scripts/env.sh` 里设置）。`scripts/sync_from_host.sh` 会定期把结果拉回本地，跑完后删掉远端目录。命令见上方英文部分，依次是：vLLM/SGLang 的 AgentX（按 InferenceX 自己的 recipe 起 server）、DeepInfer 的 AgentX、PD 分离、带 Mooncake Store L3 的前缀缓存，以及出报告。定长闭环对比见 `docs/fairness.md`。
+
+**踩过的坑：**
+- `--privileged` 容器会忽略 `--gpus device=`。
+- 同一个框架并行起多个 server 时，内部端口要错开。
+- `--ipc=host` 的容器被强杀后会在 `/dev/shm` 里留下共享内存段（`scripts/clean_orphan_shm.sh`）。
+- 跨容器的 CUDA IPC 需要 `--pid=host`。
+- 系统自动升级可能在运行中途重启 Fabric Manager，恢复方法是停 FM → `nvidia-smi -r` → 启动 FM。
+
+详情见各 issue 和 `docs/`。
+
+## 提交给上游的内容
+
+见上方英文部分：给 DeepInfer #147 的两条建议都已被采纳（EPLB 默认关闭、fast tokenizer）；DeepInfer Draft PR #214（PD 的 Mooncake KV 传输）和 #216（前缀缓存的 Mooncake Store L3）；Mooncake PR #4873（nvlink_intra 诊断提示和文档），以及在 RFC #4803 下的评论。草稿和已发布的文字都保存在 `docs/upstream/`。
 
 ## 目录
 
-```
-bench/
-  common.py          数据集/记录格式 + 指标计算（三家共用）
-  make_dataset.py    生成定长请求文件，存 token ids（random 或 ShareGPT 真实文本）
-  client_openai.py   SGLang / vLLM 压测 client：/v1/completions 流式，闭环固定并发
-  run_deepinfer.py   DeepInfer 压测：直接驱动 LLMEngine，闭环语义相同
-  summarize.py       markdown 表 + 吞吐-交互性 Pareto 图
-scripts/
-  env.sh             所有路径和 DeepInfer 环境变量（换机器只改这里）
-  scenarios.sh       场景（输入/输出长度）和并发点
-  make_datasets.sh   为一个场景生成每个并发点的数据集
-  serve_sglang.sh    起 SGLang server（ref / ref-nospec / tp8 / tp8-nospec）
-  serve_vllm.sh      起 vLLM server（ref / ref-spec / tp8 / tp8-spec）
-  sweep_server.sh    对已起好的 server 扫一个场景
-  sweep_deepinfer.sh DeepInfer 扫一个场景
-  run_agentx.sh      用 InferenceX AgentX 压 SGLang / vLLM
-  stop_servers.sh    停 server 容器、释放 GPU
-  pull_results.sh    （本地运行）把结果拉回 results/，可选清理远端临时目录
-docs/
-  setup_deepinfer.md   DeepInfer 编译与模型下载（含所有踩过的坑）
-  fairness.md          公平对比的规则和指标定义  <- 先读这个
-  reference_configs.md 官方参考命令和三家配置的差异
-  agentx.md            InferenceX AgentX，以及 DeepInfer 要跑它还缺什么
-results/               拉回来的结果，每次运行一个目录
-```
-
-## 快速开始（定长）
-
-B200 机器不固定。所有东西都放在 `/opt/dlami/nvme/bench_tmp`（`$WORK`），跑完把结果拉回本地，再删掉远端目录。命令见上方英文部分，各步骤含义：
-
-0. 本地：把仓库同步到 B200 的临时目录
-1. B200 上：DeepInfer 已按 `docs/setup_deepinfer.md` 编译好、模型已下载
-2. DeepInfer（先确认没有 server 占着 GPU）
-3. SGLang
-4. vLLM
-5. 汇总
-6. 本地：拉回结果并清理远端临时目录
-
-主线对比用 4 卡（和 InferenceX 一致），命令见上方英文部分。8 卡补充用 `tp8` 和 `deepinfer-ep8-*`（`sweep_deepinfer.sh ... 8 ...`）。官方参考配置（A 层）用 `ref`：SGLang `ref` 是 TP4/EP4，但 cuda graph 只到 bs 64；vLLM `ref` 用 2 卡、max-num-seqs 8，只适合低并发，用 `CONCURRENCIES="1 2 4 8"` 限定并发点。
-
-AgentX：见 `docs/agentx.md`。
-
+见上方英文部分。
 </details>
