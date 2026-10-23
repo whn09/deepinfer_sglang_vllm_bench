@@ -20,7 +20,7 @@ DeepSeek-V4.1-Flash-1017, `semianalysis_cc_traces_weka_062126`, agentx-harness 1
 4. **What remains is structural.**
    - Low-concurrency interactivity is 0.62–0.76× at c ≤ 16: DP attention gives one request one GPU, while TP4 gives it four.
    - The long-prefill tail: cold 300K-token prompts are ~23× slower than vLLM, more than the 4× GPU count explains. Not yet profiled.
-5. **SGLang:** best throughput at high concurrency (DEP4 + HiCache up to c=256, 305K tok/s/GPU). Its TTFT is 1.3–1.6 s on DEP4 points, both in our runs and in InferenceX's. Hypothesis, untested: the default `--tokenizer-backend huggingface`; SGLang also supports `fastokens`.
+5. **SGLang:** best throughput at high concurrency (DEP4 + HiCache up to c=256, 305K tok/s/GPU). Its TTFT is 1.3–1.6 s on DEP4 points, both in our runs and in InferenceX's. The tokenizer is not the whole story. InferenceX's recipe already uses `--tokenizer-backend fastokens` for the TP4 points, whose TTFT is still 0.2–0.6 s. For DEP4 it deliberately uses `huggingface` with `--tokenizer-worker-num 1`. A DEP4 + fastokens A/B is running.
 6. **PD 4P+4D (TCP, upstream #197)** on 8 GPUs gives the best per-user speed at c ≥ 64 (interactivity 1.2–1.75× vLLM TP4) at about half the throughput per GPU. Mooncake nvlink_intra transport runs are in progress (#18, draft upstream PR deepseek-ai/DeepInfer#214).
 
 **Caveats**
@@ -43,7 +43,7 @@ DeepSeek-V4.1-Flash-1017, `semianalysis_cc_traces_weka_062126`, agentx-harness 1
 4. **剩下的差距来自结构。**
    - c ≤ 16 时 interactivity 只有 0.62–0.76×：DP attention 下一个请求只用一张卡，TP4 能用四张。
    - 长 prefill 的长尾：30 万 token 的冷 prompt 比 vLLM 慢约 23 倍，超出 4 倍卡数差能解释的范围，还没有 profile。
-5. **SGLang：** 高并发下吞吐最好（DEP4 + HiCache 一直到 c=256，每卡 30.5 万 tok/s）。但它在 DEP4 各点上的 TTFT 有 1.3–1.6 s，我们的结果和 InferenceX 都是如此。推测（未验证）原因是默认的 `--tokenizer-backend huggingface`；SGLang 也支持 `fastokens`。
+5. **SGLang：** 高并发下吞吐最好（DEP4 + HiCache 一直到 c=256，每卡 30.5 万 tok/s）。但它在 DEP4 各点上的 TTFT 有 1.3–1.6 s，我们的结果和 InferenceX 都是如此。原因不只是 tokenizer：InferenceX 的配方在 TP4 各点已经用了 `--tokenizer-backend fastokens`，TTFT 仍有 0.2–0.6 s；DEP4 各点则刻意用 `huggingface` 加 `--tokenizer-worker-num 1`。DEP4 + fastokens 的 A/B 正在跑。
 6. **PD 4P+4D（TCP，上游 #197）** 用 8 张卡，在 c ≥ 64 时每用户速度最快（interactivity 是 vLLM TP4 的 1.2–1.75×），代价是每卡吞吐只有约一半。Mooncake nvlink_intra 传输的测试正在跑（#18，上游 Draft PR deepseek-ai/DeepInfer#214）。
 
 **注意事项**
