@@ -107,7 +107,27 @@ def main() -> None:
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out / "agentx_pareto.png", dpi=130)
-    print(f"wrote {out / 'agentx_table.md'} and {out / 'agentx_pareto.png'}")
+
+    # TTFT p50 vs concurrency: the Pareto plot above has no TTFT axis. Published series mix topologies at the same
+    # concurrency (e.g. vLLM tp4 and dep2 at c=8), so they get one line per topology.
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for name, rows in series.items():
+        dashed = "InferenceX" in name
+        topos = sorted({r["topo"] for r in rows}) if dashed else [None]
+        for topo in topos:
+            sel = sorted((r for r in rows if (topo is None or r["topo"] == topo) and r["p50_ttft"]), key=lambda r: r["conc"])
+            if sel:
+                label = f"{name} {topo}" if dashed else name
+                ax.plot([r["conc"] for r in sel], [r["p50_ttft"] for r in sel], "x--" if dashed else "o-", ms=4, label=label)
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("concurrency")
+    ax.set_ylabel("TTFT p50 (s)")
+    ax.set_title("DeepSeek-V4.1-Flash on B200, AgentX: TTFT p50 by concurrency")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(out / "agentx_ttft.png", dpi=130)
+    print(f"wrote {out / 'agentx_table.md'}, {out / 'agentx_pareto.png'} and {out / 'agentx_ttft.png'}")
 
 
 if __name__ == "__main__":
