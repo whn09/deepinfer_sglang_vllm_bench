@@ -1,0 +1,6 @@
+# Thin layer over deepinfer:agentx-v2: Mooncake Store as an L3 tier under #144's HostPrefixCache (#20). Python-only.
+#   docker build -f docker/Dockerfile.deepinfer-agentx-l3 -t deepinfer:agentx-l3 .
+ARG BASE=deepinfer:agentx-v2
+FROM ${BASE}
+COPY patches/deepinfer-hicache-mooncake-l3.patch /tmp/l3.patch
+RUN cd /workspace/DeepInfer && git apply /tmp/l3.patch && rm /tmp/l3.patch

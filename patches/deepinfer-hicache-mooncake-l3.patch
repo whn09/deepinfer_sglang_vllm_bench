@@ -1,0 +1,602 @@
+diff --git a/deepinfer/hicache/host_cache.py b/deepinfer/hicache/host_cache.py
+index 40e5ff2..b395b83 100644
+--- a/deepinfer/hicache/host_cache.py
++++ b/deepinfer/hicache/host_cache.py
+@@ -24,6 +24,10 @@ Policy
+ 
+ Not covered: tokens generated during decode are not stored (they are re-prefilled as part of the next turn's
+ prompt and stored then); the cache is per engine process (route a conversation's turns to the same rank).
++
++L3 (optional): with DEEPINFER_HICACHE_MOONCAKE_STORE set, every stored page group and state is also written behind
++to a Mooncake Store (deepinfer/hicache/mooncake_store.py), and a host miss is extended from the Store, so prefixes
++are shared across DP ranks, server instances and restarts.
+ """
+ 
+ from __future__ import annotations
+@@ -64,6 +68,7 @@ class _Chain:
+     tokens: np.ndarray
+     hashes: list[bytes] = field(default_factory=list)
+     counted: bool = False  # lookup stats recorded (a deferred request is looked up repeatedly)
++    l3_tried: bool = False  # L3 consulted once for this request
+ 
+ 
+ @dataclass
+@@ -82,6 +87,13 @@ class Stats:
+     evicted_pages: int = 0
+     evicted_states: int = 0
+     errors: int = 0
++    l3_lookups: int = 0
++    l3_hits: int = 0
++    l3_pages_loaded: int = 0
++    l3_states_loaded: int = 0
++    l3_get_failed: int = 0
++    l3_get_seconds: float = 0.0
++    l3_errors: int = 0
+ 
+     def as_dict(self) -> dict[str, int]:
+         return dict(self.__dict__)
+@@ -137,6 +149,9 @@ class HostPrefixCache:
+         self._chains: dict[str, _Chain] = {}
+         self.stats = Stats()
+         self.enabled = True
++        self.l3 = self._make_l3()
++        self.l3_group = self.l3.group_pages if self.l3 is not None else 0
++        self._l3_uploaded: OrderedDict[str, None] = OrderedDict()  # recently put/seen L3 keys (skip re-puts)
+         # DEEPINFER_HICACHE_DEBUG_SYNC=1: synchronize after every launch and log it (pinpoints a faulting kernel).
+         self._debug_sync = os.environ.get("DEEPINFER_HICACHE_DEBUG_SYNC", "0") == "1"
+         logger.info(
+@@ -150,6 +165,30 @@ class HostPrefixCache:
+             self.keep_tokens,
+         )
+ 
++    def _make_l3(self):  # noqa: ANN202
++        from deepinfer.hicache import mooncake_store
++
++        config = mooncake_store.config_from_env()
++        if config is None:
++            return None
++        model_cfg = os.path.join(str(self.engine.model_config.model), "config.json")
++        with open(model_cfg, "rb") as f:
++            cfg_hash = hashlib.sha256(f.read()).hexdigest()
++        fp = mooncake_store.layout_fingerprint(
++            dict(
++                config=cfg_hash,
++                page_bytes=self.page_bytes,
++                state_bytes=self.state_bytes,
++                block_size=self.block_size,
++                extra_state=int(envs.DEEPINFER_PREFILL_STORE_EXTRA_STATE),
++                extra_size=int(envs.DEEPINFER_PREFILL_STORE_EXTRA_SIZE),
++                backtracking=int(envs.DEEPINFER_MAX_BACKTRACKING_TOKENS),
++                swa_kvstore=int(GPUCacheInterface.swa_block_size_kvstore),
++            )
++        )
++        group = int(os.environ.get("DEEPINFER_HICACHE_L3_GROUP_PAGES", "4"))
++        return mooncake_store.MooncakeL3(config, fp, group)
++
+     def _allocate(self) -> None:
+         if self._allocated:
+             return
+@@ -163,6 +202,9 @@ class HostPrefixCache:
+         self.host_states_ptr = self.host_states.data_ptr()
+         # Staging ring on the GPU for state slices; reuse is safe because every transfer runs on the same stream.
+         self._staging = [torch.empty(self.state_bytes, dtype=torch.uint8, device=self.device) for _ in range(self.staging_slots)]
++        if self.l3 is not None:
++            self.l3.register(self.host_pages_ptr, self.host_pages.numel())
++            self.l3.register(self.host_states_ptr, self.host_states.numel())
+         self._allocated = True
+         logger.info("HostPrefixCache: host pools pinned in %.1fs", time.perf_counter() - t0)
+ 
+@@ -194,10 +236,10 @@ class HostPrefixCache:
+         self._staging_idx = (self._staging_idx + 1) % len(self._staging)
+         return t
+ 
+-    def _track(self, entries: list[_Entry]) -> None:
++    def _track(self, entries: list[_Entry], uploads: list | None = None) -> None:
+         ev = torch.cuda.Event()
+         ev.record()
+-        self._inflight.append((ev, entries))
++        self._inflight.append((ev, entries, uploads or []))
+ 
+     def _checkpoint(self, what: str) -> None:
+         if self._debug_sync:
+@@ -210,10 +252,16 @@ class HostPrefixCache:
+     def poll(self) -> None:
+         """Retire completed transfers (events on one stream complete in order, so only the head is checked)."""
+         while self._inflight and self._inflight[0][0].query():
+-            _, entries = self._inflight.popleft()
++            _, entries, uploads = self._inflight.popleft()
+             for e in entries:
+                 e.refs -= 1
+                 e.ready = True
++            for up in uploads:
++                self._l3_submit(*up)
++        if self.l3 is not None:
++            for held in self.l3.drain_done():
++                for e in held:
++                    e.refs -= 1
+ 
+     def _evict(self, pool: OrderedDict[bytes, _Entry], free: list[int], need: int) -> int:
+         """Evict `need` LRU entries that are idle; evicts nothing (returns 0) if that many cannot be found."""
+@@ -274,6 +322,13 @@ class HostPrefixCache:
+             return 0
+         max_pages = limit // bs
+         self._extend(chain, max_pages)
++        if self.l3 is not None and not chain.l3_tried:
++            chain.l3_tried = True
++            try:
++                self._l3_fill(chain, max_pages, limit)
++            except Exception:  # noqa: BLE001 - fall back to the host-only lookup
++                logger.exception("host prefix cache: L3 fetch failed for %s", request_id)
++                self.stats.l3_errors += 1
+         matched = 0
+         for h in chain.hashes[:max_pages]:
+             e = self.pages.get(h)
+@@ -369,7 +424,10 @@ class HostPrefixCache:
+                 self.states.move_to_end(key)
+             else:
+                 new_states.append((pos, key))
++        uploads = self._l3_plan(chain, num_pages, [key for _, key in new_states])
+         if not missing and not new_states:
++            for up in uploads:  # everything is already on the host: upload right away
++                self._l3_submit(*up)
+             return
+         if not self._reserve(self.pages, self.free_pages, len(missing)):
+             self.stats.store_skipped += 1
+@@ -412,9 +470,153 @@ class HostPrefixCache:
+             self._checkpoint("store: state copy D2H")
+             entries.append(st)
+             self.stats.states_stored += 1
+-        self._track(entries)
++        self._track(entries, uploads)
+         self.stats.stores += 1
+ 
++    # ------------------------------------------------------------------ L3 (Mooncake Store)
++
++    def _l3_seen(self, key: str) -> bool:
++        if key in self._l3_uploaded:
++            self._l3_uploaded.move_to_end(key)
++            return True
++        return False
++
++    def _l3_mark(self, key: str) -> None:
++        self._l3_uploaded[key] = None
++        while len(self._l3_uploaded) > 1_000_000:
++            self._l3_uploaded.popitem(last=False)
++
++    def _l3_plan(self, chain: _Chain, num_pages: int, new_state_keys: list[bytes]) -> list:
++        """Page groups of this prompt and its new states the Store has not seen yet: [(page hashes, groups, state keys)]."""
++        if self.l3 is None:
++            return []
++        g = self.l3_group
++        groups = [i for i in range(num_pages // g) if not self._l3_seen(self.l3.group_key(chain.hashes[(i + 1) * g - 1]))]
++        state_keys = [k for k in new_state_keys if not self._l3_seen(self.l3.state_key(k))]
++        if not groups and not state_keys:
++            return []
++        return [(chain.hashes[:num_pages], groups, state_keys)]
++
++    def _l3_submit(self, hashes: list[bytes], groups: list[int], state_keys: list[bytes]) -> None:
++        """Pin the host slots of the planned groups/states and queue a write-behind put. Entries that are gone (evicted)
++        or not ready are skipped."""
++        g = self.l3_group
++        keys, ptrs, sizes, held = [], [], [], []
++        for i in groups:
++            es = [self.pages.get(h) for h in hashes[i * g : (i + 1) * g]]
++            if any(e is None or not e.ready for e in es):
++                continue
++            keys.append(self.l3.group_key(hashes[(i + 1) * g - 1]))
++            ptrs.append([self.host_pages_ptr + e.slot * self.page_bytes for e in es])
++            sizes.append([self.page_bytes] * g)
++            held += es
++        for k in state_keys:
++            st = self.states.get(k)
++            if st is None or not st.ready:
++                continue
++            keys.append(self.l3.state_key(k))
++            ptrs.append([self.host_states_ptr + st.slot * self.state_bytes])
++            sizes.append([self.state_bytes])
++            held.append(st)
++        if not keys:
++            return
++        for e in held:
++            e.refs += 1
++        for k in keys:
++            self._l3_mark(k)
++        self.l3.submit_put(keys, ptrs, sizes, held)
++
++    def _l3_fill(self, chain: _Chain, max_pages: int, limit: int) -> None:
++        """Extend the host cache with page groups and a state from the Store, so the host lookup that follows hits
++        deeper. No-op when the Store adds nothing beyond what the host already has."""
++        bs, g, l3 = self.block_size, self.l3_group, self.l3
++        self._allocate()  # pools are lazy; a fresh instance can hit L3 before it ever stored anything
++        host_pages = 0
++        for h in chain.hashes[:max_pages]:
++            e = self.pages.get(h)
++            if e is None or not e.ready:
++                break
++            host_pages += 1
++        first_group = host_pages // g
++        n_groups = max_pages // g - first_group
++        if n_groups <= 0:
++            return
++        self.stats.l3_lookups += 1
++        group_keys = [l3.group_key(chain.hashes[(first_group + i + 1) * g - 1]) for i in range(n_groups)]
++        present = l3.exists(group_keys)
++        k = 0
++        while k < n_groups and present[k]:
++            k += 1
++        if k == 0:
++            return
++        l3_pages = (first_group + k) * g  # pages available in host + L3
++        # deepest boundary <= min(l3_pages * bs, limit) beyond the host-only reach that has a state (host or L3)
++        top = min(l3_pages * bs, limit) // bs
++        candidates = [p for p in range(top, host_pages, -1) if p * bs >= self.min_hit_tokens]
++        if not candidates:
++            return
++        host_state = {p: (self.states.get(chain.hashes[p - 1]) is not None) for p in candidates}
++        need_l3 = [p for p in candidates if not host_state[p]]
++        in_l3 = dict(zip(need_l3, l3.exists([l3.state_key(chain.hashes[p - 1]) for p in need_l3]), strict=True))
++        pick = next((p for p in candidates if host_state[p] or in_l3.get(p)), None)
++        if pick is None:
++            return
++        state_from_l3 = not host_state[pick]
++        fetch_groups = list(range(first_group, (pick + g - 1) // g))  # groups covering pages [first_group*g, pick)
++
++        # Pin the host prefix so reserving slots below cannot evict it, then reserve.
++        prefix = [self.pages[h] for h in chain.hashes[:host_pages]]
++        for e in prefix:
++            e.refs += 1
++        try:
++            need_pages = len(fetch_groups) * g
++            if not self._reserve(self.pages, self.free_pages, need_pages):
++                return
++            if state_from_l3 and not self._reserve(self.states, self.free_states, 1):
++                return
++            slots = [self.free_pages.pop() for _ in range(need_pages)]
++            keys = [l3.group_key(chain.hashes[(i + 1) * g - 1]) for i in fetch_groups]
++            ptrs = [[self.host_pages_ptr + s * self.page_bytes for s in slots[j * g : (j + 1) * g]] for j in range(len(fetch_groups))]
++            sizes = [[self.page_bytes] * g for _ in fetch_groups]
++            st_slot = None
++            if state_from_l3:
++                st_slot = self.free_states.pop()
++                keys.append(l3.state_key(chain.hashes[pick - 1]))
++                ptrs.append([self.host_states_ptr + st_slot * self.state_bytes])
++                sizes.append([self.state_bytes])
++            t0 = time.perf_counter()
++            ok = l3.get(keys, ptrs, sizes)
++            self.stats.l3_get_seconds += time.perf_counter() - t0
++            if not all(ok):  # evicted from the Store in between, or a transfer error: drop the whole fetch
++                self.stats.l3_get_failed += 1
++                self.free_pages.extend(slots)
++                if st_slot is not None:
++                    self.free_states.append(st_slot)
++                return
++            loaded = 0
++            for j, gi in enumerate(fetch_groups):
++                for t in range(g):
++                    page = gi * g + t
++                    slot = slots[j * g + t]
++                    h = chain.hashes[page]
++                    if page >= pick or h in self.pages:  # beyond the hit, or the host already holds this page
++                        self.free_pages.append(slot)
++                        continue
++                    e = _Entry(h, slot)
++                    e.ready = True
++                    self.pages[h] = e
++                    loaded += 1
++            if st_slot is not None:
++                st = _Entry(chain.hashes[pick - 1], st_slot)
++                st.ready = True
++                self.states[st.key] = st
++                self.stats.l3_states_loaded += 1
++            self.stats.l3_hits += 1
++            self.stats.l3_pages_loaded += loaded
++        finally:
++            for e in prefix:
++                e.refs -= 1
++
+     # ------------------------------------------------------------------ misc
+ 
+     def _fail(self) -> None:
+@@ -434,4 +636,6 @@ class HostPrefixCache:
+             inflight=len(self._inflight),
+             hit_rate_tokens=(self.stats.hit_tokens / self.stats.lookup_tokens) if self.stats.lookup_tokens else 0.0,
+         )
++        if self.l3 is not None:
++            d.update(self.l3.stats_dict())
+         return d
+diff --git a/deepinfer/hicache/mooncake_store.py b/deepinfer/hicache/mooncake_store.py
+new file mode 100644
+index 0000000..00e0575
+--- /dev/null
++++ b/deepinfer/hicache/mooncake_store.py
+@@ -0,0 +1,140 @@
++"""Mooncake Store as an L3 tier under HostPrefixCache (GPU -> pinned host pool -> Mooncake Store).
++
++Enabled by DEEPINFER_HICACHE_MOONCAKE_STORE: a JSON object (or "@/path/to/file.json") with Mooncake's
++`MooncakeDistributedStore.setup(config)` keys, e.g.
++
++    {"local_hostname": "127.0.0.1", "metadata_server": "http://127.0.0.1:18080/metadata",
++     "master_server_addr": "127.0.0.1:50551", "protocol": "tcp", "global_segment_size": 0}
++
++Objects
++    page groups  dsv4kv/<fp>/g<G>/<chain hash of the group's last page>  G consecutive KV pages (G * page_bytes)
++    states       state/<fp>/<chain hash at the 128-aligned boundary>      the SWA stored region (state_bytes)
++    <fp> versions the layout (checkpoint config, page/state sizes, env-dependent state layout), so a layout change
++    is a clean miss. The state namespace follows the contract discussed in kvcache-ai/Mooncake#4803. Pages hold all
++    layers of a block, so they are independent of the DP rank: any rank or instance can reuse them.
++    Pages are grouped (DEEPINFER_HICACHE_L3_GROUP_PAGES, default 4 = 512 tokens) because per-object overhead dominates
++    for single 114 KB pages (0.17 GB/s vs 1.7 GB/s at 4 pages over TCP on one host).
++
++Data moves between the Store and the (registered) pinned host pools with batch_put_from_multi_buffers /
++batch_get_into_multi_buffers, so no extra copies. Puts run on a background thread (write-behind); the engine thread
++learns about completions through drain_done(). Gets are synchronous (called from try_resume).
++"""
++
++from __future__ import annotations
++
++import collections
++import hashlib
++import json
++import os
++import queue
++import threading
++import time
++from typing import Any
++
++from deepinfer.logger import init_logger
++
++logger = init_logger(__name__)
++
++ENV = "DEEPINFER_HICACHE_MOONCAKE_STORE"
++FORMAT_VERSION = 1
++
++
++def config_from_env() -> dict | None:
++    raw = os.environ.get(ENV, "").strip()
++    if not raw:
++        return None
++    if raw.startswith("@"):
++        with open(raw[1:]) as f:
++            raw = f.read()
++    return json.loads(raw)
++
++
++def layout_fingerprint(parts: dict[str, Any]) -> str:
++    """Version byte + short hash of everything that determines the bytes of a page / state."""
++    blob = json.dumps(parts, sort_keys=True).encode()
++    return f"v{FORMAT_VERSION}-{hashlib.sha256(blob).hexdigest()[:16]}"
++
++
++class MooncakeL3:
++    def __init__(self, config: dict, fingerprint: str, group_pages: int) -> None:
++        from mooncake.store import MooncakeDistributedStore  # optional dependency (pip install mooncake-transfer-engine)
++
++        cfg = dict(config)
++        cfg.setdefault("global_segment_size", 0)  # memory is contributed by a standalone mooncake_client by default
++        self.store = MooncakeDistributedStore()
++        rc = self.store.setup(cfg)
++        if rc != 0:
++            raise RuntimeError(f"MooncakeDistributedStore.setup failed: {rc}")
++        self.fingerprint = fingerprint
++        self.group_pages = group_pages
++        self._page_prefix = f"dsv4kv/{fingerprint}/g{group_pages}/"
++        self._state_prefix = f"state/{fingerprint}/"
++        self._puts: queue.Queue = queue.Queue()
++        self._done: collections.deque = collections.deque()  # tokens of finished puts (appended by the worker thread)
++        self.put_objects = self.put_failed = self.put_bytes = 0
++        self.put_seconds = 0.0
++        threading.Thread(target=self._put_worker, name="hicache-l3-put", daemon=True).start()
++        logger.info("HostPrefixCache L3: Mooncake Store ready (fingerprint %s, %d pages per object)", fingerprint, group_pages)
++
++    def register(self, ptr: int, nbytes: int) -> None:
++        rc = self.store.register_buffer(ptr, nbytes)
++        if rc != 0:
++            raise RuntimeError(f"Mooncake register_buffer({nbytes} bytes) failed: {rc}")
++
++    def group_key(self, last_page_hash: bytes) -> str:
++        return self._page_prefix + last_page_hash.hex()
++
++    def state_key(self, boundary_hash: bytes) -> str:
++        return self._state_prefix + boundary_hash.hex()
++
++    # ---------------------------------------------------------------- write-behind (any thread may submit)
++
++    def submit_put(self, keys: list[str], ptrs: list[list[int]], sizes: list[list[int]], token: object) -> None:
++        """Queue a batch put; `token` comes back from drain_done() when the put has returned (success or not)."""
++        self._puts.put((keys, ptrs, sizes, token))
++
++    def drain_done(self) -> list[object]:
++        out = []
++        while self._done:
++            out.append(self._done.popleft())
++        return out
++
++    def _put_worker(self) -> None:
++        while True:
++            keys, ptrs, sizes, token = self._puts.get()
++            t0 = time.perf_counter()
++            try:
++                rcs = self.store.batch_put_from_multi_buffers(keys, ptrs, sizes)
++                # an object that already exists (another rank or instance stored it first) is not a failure
++                failed = sum(1 for rc in rcs if rc not in (0, -705))
++                self.put_objects += len(keys) - failed
++                self.put_failed += failed
++                self.put_bytes += sum(sum(s) for s, rc in zip(sizes, rcs, strict=True) if rc == 0)
++            except Exception:  # noqa: BLE001 - a Store problem must not take the engine down
++                logger.exception("HostPrefixCache L3: batch put failed")
++                self.put_failed += len(keys)
++            self.put_seconds += time.perf_counter() - t0
++            self._done.append(token)
++
++    # ---------------------------------------------------------------- read (engine thread)
++
++    def exists(self, keys: list[str]) -> list[bool]:
++        if not keys:
++            return []
++        return [rc == 1 for rc in self.store.batch_is_exist(keys)]
++
++    def get(self, keys: list[str], ptrs: list[list[int]], sizes: list[list[int]]) -> list[bool]:
++        """Read each object into its list of buffers; True where the whole object arrived."""
++        if not keys:
++            return []
++        rcs = self.store.batch_get_into_multi_buffers(keys, ptrs, sizes)
++        return [rc == sum(s) for rc, s in zip(rcs, sizes, strict=True)]
++
++    def stats_dict(self) -> dict[str, int | float]:
++        return dict(
++            l3_put_objects=self.put_objects,
++            l3_put_failed=self.put_failed,
++            l3_put_gib=round(self.put_bytes / 2**30, 3),
++            l3_put_seconds=round(self.put_seconds, 3),
++            l3_put_queue=self._puts.qsize(),
++        )
+diff --git a/tests/hicache/test_host_cache_l3.py b/tests/hicache/test_host_cache_l3.py
+new file mode 100644
+index 0000000..93d620b
+--- /dev/null
++++ b/tests/hicache/test_host_cache_l3.py
+@@ -0,0 +1,144 @@
++"""HostPrefixCache L3 (Mooncake Store) logic against a dict-backed fake store: write-behind of page groups and
++states, a second cache (another rank / instance) extending its empty host pool from L3, no re-puts, and a fetch that
++loses an object between exists() and get(). Same fake engine as test_host_cache.py. Needs one GPU."""
++
++from __future__ import annotations
++
++import ctypes
++
++import numpy as np
++import pytest
++import torch
++
++from tests.hicache.test_host_cache import BLOCK, PAGE, STATE, FakeSeq, _prefill, _tokens, engine  # noqa: F401
++
++pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
++
++GROUP = 4
++
++
++class FakeL3:
++    """In-memory stand-in for MooncakeL3 with the same interface; puts complete synchronously."""
++
++    def __init__(self) -> None:
++        self.group_pages = GROUP
++        self.objects: dict[str, bytes] = {}
++        self.puts = 0
++        self.drop_on_get: set[str] = set()  # keys that vanish between exists() and get()
++        self._done: list[object] = []
++
++    def register(self, ptr: int, nbytes: int) -> None:
++        pass
++
++    def group_key(self, h: bytes) -> str:
++        return "dsv4kv/test/g4/" + h.hex()
++
++    def state_key(self, h: bytes) -> str:
++        return "state/test/" + h.hex()
++
++    def submit_put(self, keys, ptrs, sizes, token) -> None:  # noqa: ANN001
++        for k, ps, ss in zip(keys, ptrs, sizes, strict=True):
++            if k not in self.objects:
++                self.objects[k] = b"".join(ctypes.string_at(p, s) for p, s in zip(ps, ss, strict=True))
++                self.puts += 1
++        self._done.append(token)
++
++    def drain_done(self) -> list[object]:
++        out, self._done = self._done, []
++        return out
++
++    def exists(self, keys: list[str]) -> list[bool]:
++        return [k in self.objects for k in keys]
++
++    def get(self, keys, ptrs, sizes) -> list[bool]:  # noqa: ANN001
++        ok = []
++        for k, ps, ss in zip(keys, ptrs, sizes, strict=True):
++            data = None if k in self.drop_on_get else self.objects.get(k)
++            if data is None or len(data) != sum(ss):
++                ok.append(False)
++                continue
++            off = 0
++            for p, s in zip(ps, ss, strict=True):
++                ctypes.memmove(p, data[off : off + s], s)
++                off += s
++            ok.append(True)
++        return ok
++
++    def stats_dict(self) -> dict:
++        return {"l3_put_objects": self.puts}
++
++
++@pytest.fixture
++def l3(monkeypatch):
++    from deepinfer.hicache import HostPrefixCache
++
++    store = FakeL3()
++    monkeypatch.setattr(HostPrefixCache, "_make_l3", lambda self: store)
++    return store
++
++
++def _settle(cache) -> None:  # noqa: ANN001
++    torch.cuda.synchronize()
++    cache.poll()  # retires D2H copies and submits the planned L3 puts
++    cache.poll()  # drains the put completions (refs back to 0)
++
++
++def test_second_cache_hits_from_l3_with_exact_bytes(engine, l3):  # noqa: F811
++    from deepinfer.hicache import HostPrefixCache
++
++    blocks = engine.driver_worker.cache_engine.gpu_blocks
++    states = engine.driver_worker.cache_engine.gpu_states
++    a_cache = HostPrefixCache(engine, size_bytes=50 * PAGE, num_state_slots=8)
++    a = FakeSeq("a", _tokens(1000, 1))
++    _prefill(engine, a_cache, a)
++    _settle(a_cache)
++    # 7 pages -> one full group (pages 0..3) + states at 896/768/640/512
++    assert len([k for k in l3.objects if k.startswith("dsv4kv/")]) == 1
++    assert len([k for k in l3.objects if k.startswith("state/")]) == 4
++    assert all(e.refs == 0 for e in list(a_cache.pages.values()) + list(a_cache.states.values()))
++    a_pages = [blocks[b].clone() for b in a.block_table[:4]]
++    a_state = states[a.state_id, :STATE].clone()
++
++    # Another rank / instance: empty host pool, same prefix + a new turn. Host alone would miss; L3 gives the group
++    # and the state at 512 (the only boundary inside the stored group).
++    b_cache = HostPrefixCache(engine, size_bytes=50 * PAGE, num_state_slots=8)
++    b = FakeSeq("b", np.concatenate([a.tokens, _tokens(500, 2)]))
++    assert b_cache.try_resume(b, "b", b.tokens) == 4 * BLOCK
++    torch.cuda.synchronize()
++    b_cache.poll()
++    assert all(torch.equal(blocks[b.block_table[i]], a_pages[i]) for i in range(4))
++    assert torch.equal(states[b.state_id, :STATE], a_state)
++    s = b_cache.stats
++    assert s.l3_lookups == 1 and s.l3_hits == 1 and s.l3_pages_loaded == 4 and s.l3_states_loaded == 1
++    assert all(e.refs == 0 for e in list(b_cache.pages.values()) + list(b_cache.states.values()))
++    assert len(b_cache.free_pages) + len(b_cache.pages) == b_cache.num_pages
++
++
++def test_no_reput_of_known_objects(engine, l3):  # noqa: F811
++    from deepinfer.hicache import HostPrefixCache
++
++    cache = HostPrefixCache(engine, size_bytes=50 * PAGE, num_state_slots=8)
++    a = FakeSeq("a", _tokens(1000, 1))
++    _prefill(engine, cache, a)
++    _settle(cache)
++    puts = l3.puts
++    again = FakeSeq("a-again", a.tokens.copy())
++    _prefill(engine, cache, again)  # identical prompt: nothing new on the host, nothing new for L3
++    _settle(cache)
++    assert l3.puts == puts
++
++
++def test_object_lost_between_exists_and_get_falls_back(engine, l3):  # noqa: F811
++    from deepinfer.hicache import HostPrefixCache
++
++    a_cache = HostPrefixCache(engine, size_bytes=50 * PAGE, num_state_slots=8)
++    a = FakeSeq("a", _tokens(1000, 1))
++    _prefill(engine, a_cache, a)
++    _settle(a_cache)
++    l3.drop_on_get = {k for k in l3.objects if k.startswith("dsv4kv/")}
++
++    b_cache = HostPrefixCache(engine, size_bytes=50 * PAGE, num_state_slots=8)
++    b = FakeSeq("b", np.concatenate([a.tokens, _tokens(500, 2)]))
++    assert b_cache.try_resume(b, "b", b.tokens) == 0  # miss, sequence untouched
++    assert b.block_table == [] and b_cache.stats.l3_get_failed == 1
++    assert len(b_cache.pages) == 0 and len(b_cache.free_pages) == b_cache.num_pages

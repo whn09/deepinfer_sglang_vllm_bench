@@ -16,13 +16,15 @@ NAME="bench-deepinfer$SUF"
 AL="${IX_SYNTHETIC_AL:-3.51}"
 bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$(seq -s, $OFFSET $((OFFSET + 3)))" || exit 1
 docker rm -f "$NAME" > /dev/null 2>&1 || true
+# DI_L3=1: Mooncake Store L3 under the host prefix cache (#20; needs deepinfer:agentx-l3 and scripts/serve_mooncake_store.sh)
+L3_ARGS=(); [ "${DI_L3:-0}" = 1 ] && L3_ARGS=(-e 'DEEPINFER_HICACHE_MOONCAKE_STORE={"local_hostname":"127.0.0.1","metadata_server":"http://127.0.0.1:18080/metadata","master_server_addr":"127.0.0.1:50551","protocol":"tcp","global_segment_size":0}')
 TRACE_ARGS=(); [ -n "${DI_TRACE:-}" ] && TRACE_ARGS=(-e "DEEPINFER_SERVER_TRACE=/trace/$(basename "$DI_TRACE")" -v "$(dirname "$DI_TRACE")":/trace)
 # --privileged 下选卡靠 DEVICE_OFFSET（DeepInfer 自己设 CUDA_VISIBLE_DEVICES）；两个实例并行时 MASTER_PORT 要错开
 docker run -d --name "$NAME" --gpus all --privileged --ipc=host --network host --shm-size 32g --ulimit memlock=-1 \
     -e DEVICE_OFFSET=$OFFSET -e MASTER_PORT=$MPORT \
     -e NCCL_GIN_TYPE=5 -e "NCCL_IB_HCA=^=ibp115s0f0,ibp116s0f0" \
     -e DEEPINFER_USE_NEXTN_DECODE=5 -e DEEPINFER_SIMULATE_ACC_LEN="$AL" -e DEEPINFER_TOKENIZE_VERIFY="${DI_TOKENIZE_VERIFY:-0}" \
-    -e DEEPINFER_HF_MODEL_DIR=/model -v "$MODEL_DIR":/model:ro "${TRACE_ARGS[@]}" \
+    -e DEEPINFER_HF_MODEL_DIR=/model -v "$MODEL_DIR":/model:ro "${TRACE_ARGS[@]}" "${L3_ARGS[@]}" \
     "${DI_IMAGE:-deepinfer:agentx}" python -u serve/openai_server.py --model /model --served-model-name "$SERVED_MODEL_NAME" \
         --dp 4 --port "$PORT" --thinking-mode "${DI_THINKING:-thinking}" --hicache-size-gb "${DI_HICACHE_GB:-32}" \
         --routing "${DI_ROUTING:-sticky-balanced}" \
