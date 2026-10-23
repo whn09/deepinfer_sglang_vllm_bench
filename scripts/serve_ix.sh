@@ -9,6 +9,7 @@
 #   IX_RECIPES       InferenceX recipe 目录（默认 $WORK/inferencex-e2e/recipes/dsv41flash）
 #   IX_SYNTHETIC_AL  golden 接受长度（默认 3.51 = DSpark 5 thinking on；设 0 用真实验证）
 #   GPUS_OVERRIDE / SGLANG_PORT / VLLM_PORT / CONTAINER_SUFFIX  同 serve_*.sh
+#   IX_EXTRA_ARGS    追加到 recipe 的 server 参数之后（在公开配置上做 A/B）
 # 成功后把 AgentX 应该连的地址写到 $WORK/logs/ix_endpoint<suffix>（router 存在时是 router 的地址）。
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
@@ -30,6 +31,8 @@ SYN=(); [ "$AL" != "0" ] && SYN=(--synthetic-al "$AL")
 python "$BENCH_ROOT/bench/ix_recipe.py" "$RECIPE" --conc "$C" ${TOPO:+--topology "$TOPO"} --engine "$FW" "${SYN[@]}" --format json > "$J"
 mapfile -t ARGS < <(python "$BENCH_ROOT/bench/ix_recipe.py" "$RECIPE" --conc "$C" ${TOPO:+--topology "$TOPO"} --engine "$FW" "${SYN[@]}" --format cli)
 mapfile -t ENVS < <(python "$BENCH_ROOT/bench/ix_recipe.py" "$RECIPE" --conc "$C" ${TOPO:+--topology "$TOPO"} --engine "$FW" "${SYN[@]}" --format env)
+# IX_EXTRA_ARGS: appended to the recipe's server args (A/B on top of the published config, e.g. "--tokenizer-backend fastokens")
+[ -n "${IX_EXTRA_ARGS:-}" ] && read -ra _EXTRA <<< "$IX_EXTRA_ARGS" && ARGS+=("${_EXTRA[@]}")
 read -r VARIANT NGPU FRONT < <(python -c "import json;d=json.load(open('$J'));print(d['variant'],d['gpus'],d['frontend'].get('type','none'))")
 
 GPUS="${GPUS_OVERRIDE:-$(seq -s, 0 $((NGPU - 1)))}"
