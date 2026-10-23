@@ -57,6 +57,7 @@ def main() -> None:
     p.add_argument("--state", required=True)
     p.add_argument("--doc-tokens", type=int, default=20000)
     p.add_argument("--max-tokens", type=int, default=128)
+    p.add_argument("--dump", help="check: write the full cached / uncached outputs here (JSON)")
     a = p.parse_args()
     doc = " ".join(f"{WORDS[i % len(WORDS)]}{i % 97}" for i in range(a.doc_tokens))
     turn1 = [{"role": "user", "content": f"{doc}\n\nWhich word comes right after 'gamma2'? Answer briefly."}]
@@ -71,6 +72,8 @@ def main() -> None:
     cached, t_cached = chat(a.port, a.model, turn2, a.max_tokens, True)
     after = counters(a.port)
     uncached, t_uncached = chat(a.port, a.model, turn2, a.max_tokens, False)
+    if a.dump:
+        json.dump({"cached": cached, "uncached": uncached}, open(a.dump, "w"))
     print(json.dumps({
         "phase": "check",
         "identical": cached == uncached,
