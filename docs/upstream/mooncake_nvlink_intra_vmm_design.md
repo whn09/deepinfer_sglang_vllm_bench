@@ -2,7 +2,7 @@
 
 Task brief for an implementing agent. Target repo: [kvcache-ai/Mooncake](https://github.com/kvcache-ai/Mooncake), Transfer Engine (`mooncake-transfer-engine`). Related:
 - kvcache-ai/Mooncake#2511 ("When enable expandable_segments, mooncake register memory failed", closed without a fix).
-- Diagnostics PR from branch `whn09:nvlink-intra-container-hints` (commit `caeecde`, error hints + docs; push pending).
+- Diagnostics PR kvcache-ai/Mooncake#4873 (error hints + docs).
 
 ## 1. Goal
 

@@ -1,4 +1,4 @@
-<!-- Draft PR for deepseek-ai/DeepInfer. Branch whn09:pd-mooncake-transport (d005d1b), stacked on #197. Not opened yet (push blocked). -->
+<!-- Opened as Draft deepseek-ai/DeepInfer#214 (whn09:pd-mooncake-transport @ d005d1b) -->
 **Title:** serve: Mooncake Transfer Engine KV transport for the prefill/decode split (`--kv-transport mooncake`)
 
 **Stacked on #197** (and therefore #144 / #147 / #195). Only the last commit is new. It adds a Mooncake [Transfer Engine](https://github.com/kvcache-ai/Mooncake) data plane to #197's prefill/decode split. #197's flow, frontend and control socket are unchanged; the default `--kv-transport tcp` behaves exactly as before.
