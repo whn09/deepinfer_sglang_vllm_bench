@@ -132,7 +132,7 @@ Release the retained handles. Close exported fds held by the fd server for that 
 
 # Mooncake `nvlink_intra`：支持 VMM（`cuMemCreate`）显存 —— 设计与任务说明
 
-这是交给实现 agent 的任务说明。目标仓库是 kvcache-ai/Mooncake 的 Transfer Engine。相关：#2511（开启 expandable_segments 后注册失败，issue 已关闭但没有修复），以及我们的诊断 PR（分支 `whn09:nvlink-intra-container-hints`，提交 `caeecde`，增加报错提示和文档，尚待推送）。
+这是交给实现 agent 的任务说明。目标仓库是 kvcache-ai/Mooncake 的 Transfer Engine。相关：#2511（开启 expandable_segments 后注册失败，issue 已关闭但没有修复），以及我们的诊断 PR（kvcache-ai/Mooncake#4873，增加报错提示和文档）。
 
 **目标：** 让 `nvlink_intra` 能注册 VMM 显存，并支持同一台机器上跨进程的读写传输；传统显存的行为不变。现在 nvlink_intra 只支持 `cudaMalloc`/`cuMemAlloc` 分配的显存，因为它靠 `cudaIpcGetMemHandle` 共享，而 `cuMemCreate` 分配的显存没有这种句柄。最典型的场景是 PyTorch 开了 `expandable_segments`：DeepInfer 无条件开启它，vLLM/SGLang 的用户也常开。跨机属于 MNNVL `nvlink` 传输，它已经支持 FABRIC 句柄，不在本任务范围内。
 
