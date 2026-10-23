@@ -14,9 +14,12 @@ compute_request_metrics），保证和 dashboard 同一套算法：
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 # (InferenceX 代码里的名字, 公开 API 里的名字, 显示名)：代码用 p50_*，API 用 median_*
@@ -35,10 +38,22 @@ KEYS = [
 
 
 def find_artifact_dir(root: Path) -> Path:
-    hit = next(root.rglob("profile_export.jsonl"), None)
+    hit = next(root.rglob("profile_export.jsonl"), None) or next(root.rglob("profile_export.jsonl.gz"), None)
     if hit is None:
-        raise SystemExit(f"no profile_export.jsonl under {root}")
+        raise SystemExit(f"no profile_export.jsonl[.gz] under {root}")
     return hit.parent
+
+
+def records_path(artifact_dir: Path) -> Path:
+    """profile_export.jsonl, or a temporary decompressed copy of profile_export.jsonl.gz (local copies are gzipped;
+    the raw artifacts are in s3://datalab/deepinfer_bench/b200_live/)."""
+    plain = artifact_dir / "profile_export.jsonl"
+    if plain.exists():
+        return plain
+    tmp = Path(tempfile.mkdtemp()) / "profile_export.jsonl"
+    with gzip.open(artifact_dir / "profile_export.jsonl.gz", "rb") as src, open(tmp, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return tmp
 
 
 def ours(artifact_dir: Path, num_gpus: int) -> dict:
@@ -46,7 +61,10 @@ def ours(artifact_dir: Path, num_gpus: int) -> dict:
     from infx.results.agentic.artifacts import load_records_with_accounting  # noqa: E402
     from infx.results.agentic.request_metrics import compute_request_metrics  # noqa: E402
 
-    records, accounting = load_records_with_accounting(artifact_dir / "profile_export.jsonl")
+    path = records_path(artifact_dir)
+    records, accounting = load_records_with_accounting(path)
+    if path.parent != artifact_dir:
+        shutil.rmtree(path.parent)
     agg_path = artifact_dir / "profile_export_aiperf.json"
     aggregate = json.loads(agg_path.read_text()) if agg_path.exists() else {}
     flat, _ = compute_request_metrics(records, aggregate)

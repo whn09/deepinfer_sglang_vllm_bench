@@ -25,7 +25,7 @@ DeepSeek-V4.1-Flash-1017, `semianalysis_cc_traces_weka_062126`, agentx-harness 1
 
 **Caveats**
 - DeepInfer runs a patched tree: #144 prefix cache, #147 server, synthetic acceptance, sticky-balanced routing, EPLB flags, fastokens (`patches/`).
-- YoCo compact truncation (keep=140, required by the #144 prefix cache) changes greedy outputs versus keep=0. keep=0 itself is deterministic and batch-invariant. Quality impact is not evaluated (#16).
+- YoCo compact truncation (keep=140, required by the #144 prefix cache) changes greedy outputs versus keep=0. Quality impact is not evaluated (#16). Prefill results also depend on where a long prompt is chunked: a prefix-cache hit at b is bit-identical to an uncached prefill chunked at b, but differs from the default 32,768-token split (confirmed on #144 and here). Our earlier "batch-invariant" check never moved the split point, so it does not establish batch invariance. Greedy A/B is therefore not a quality metric.
 - InferenceX's vLLM DEP2 rows use 2 GPUs; per-GPU numbers are still comparable.
 
 <details><summary>中文</summary>
@@ -48,6 +48,6 @@ DeepSeek-V4.1-Flash-1017, `semianalysis_cc_traces_weka_062126`, agentx-harness 1
 
 **注意事项**
 - DeepInfer 跑的是打了补丁的代码：#144 前缀缓存、#147 server、合成接受率、sticky-balanced 路由、EPLB 开关、fastokens（补丁都在 `patches/`）。
-- YoCo compact 截断（keep=140，#144 前缀缓存的前提）与 keep=0 相比会改变 greedy 输出。keep=0 本身是确定的，也不受 batch 组成影响。对质量的影响还没有评估（#16）。
+- YoCo compact 截断（keep=140，#144 前缀缓存的前提）与 keep=0 相比会改变 greedy 输出，对质量的影响还没有评估（#16）。另外，长 prompt 的 prefill 结果取决于在哪里切 chunk：在 b 处命中前缀缓存，与不走缓存、在 b 处切分的 prefill 逐位一致，但和默认按 32,768 token 切分的结果不同（已在 #144 和我们这里分别证实）。我们之前那次"不受 batch 组成影响"的检查从没移动过切分点，所以并不能证明 batch 无关。因此 greedy A/B 不能当质量指标。
 - InferenceX 公开的 vLLM DEP2 结果用 2 张卡，按每卡算的数字仍然可以直接比较。
 </details>
