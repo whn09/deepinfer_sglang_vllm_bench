@@ -30,7 +30,7 @@
 The same arm on 0.3.13 (E1, 2026-10-23 12:15) had 0 L3 hits and 63,110 tok/s/GPU.
 
 **Caveats.**
-- These runs use least-loaded routing, which is where L3 matters. With sticky routing and no L3, the headline config (`deepinfer-ix-ep4-noeplb-fastok`, 3600 s, fastokens) reaches 0.98× vLLM throughput and 0.92× interactivity at c=64. These 900 s runs don't use fastokens and are shorter, so they are not directly comparable with it.
+- These runs use least-loaded routing, which is where L3 matters: it recovers what scattering conversations across ranks loses. The headline config uses sticky routing without L3 (`deepinfer-ix-ep4-noeplb-fastok`, 3600 s) and reaches 0.98× vLLM throughput and 0.92× interactivity at c=64. The L3 arm here reaches 0.79× and 0.94×, so L3 is not a gain on top of the headline. Both use fastokens (the `agentx-v2` default `--tokenizer-backend auto`); they differ in routing and duration. A sticky + L3 pair is in [l3_sticky.md](l3_sticky.md).
 - Each request's L3 get still runs synchronously on the engine thread. Failure handling (fail fast, circuit breaker) is still open.
 
 <details><summary>中文</summary>
@@ -43,5 +43,5 @@ The same arm on 0.3.13 (E1, 2026-10-23 12:15) had 0 L3 hits and 63,110 tok/s/GPU
 
 **AgentX 配对结果**（c=64，900 s，least-loaded 路由让同一对话在不同 DP rank 之间迁移；L3 on 跑在 GPU 0-3、L3 off 跑在 GPU 4-7，两组同时跑）：L3 让吞吐提升到 1.36×，interactivity p50 提升到 1.93×；TTFT p50 从 0.53 s 降到 0.15 s；token 命中率从 73.7% 升到 92.2%；L3 命中 1757 次、put 19.5 万个对象，零失败。同样配置在 0.3.13 上（E1）L3 命中为 0。
 
-**注意：** 这组用的是 least-loaded 路由，正是 L3 最有用的场景。sticky 路由、不开 L3 的主结果（3600 s + fastokens）在 c=64 时已经达到 vLLM 吞吐的 0.98×，和这组 900 s、没开 fastokens 的结果不能直接比较。L3 get 目前仍在引擎线程上同步执行，失败处理（快速失败、熔断）还没做。
+**注意：** 这组用的是 least-loaded 路由，正是 L3 最有用的场景：它补回的是对话被打散到不同 rank 造成的损失。主结果用 sticky 路由、不开 L3（3600 s），c=64 时吞吐已经是 vLLM 的 0.98×、interactivity 0.92×；这里开了 L3 的一组是 0.79× 和 0.94×，所以 L3 并没有在主结果之上再带来提升。两者都用 fastokens（`agentx-v2` 默认 `--tokenizer-backend auto`），区别只在路由方式和时长。sticky + L3 的配对结果见 [l3_sticky.md](l3_sticky.md)。L3 get 目前仍在引擎线程上同步执行，失败处理（快速失败、熔断）还没做。
 </details>

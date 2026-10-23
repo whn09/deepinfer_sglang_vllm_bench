@@ -28,7 +28,7 @@ This repo compares three inference stacks serving `DeepSeek-V4.1-Flash-1017` on 
 | DeepInfer TTFT breakdown and fix | #17 | done, upstreamed |
 | YoCo truncation (lossless?) | #16 | keep=140 changes greedy outputs; quality eval open |
 | PD split 4P+4D, Mooncake NVLink transport | #18 | done: Mooncake = TCP (identical outputs, same perf); #214 ready for review |
-| Mooncake Store as L3 under the prefix cache | #20 | works under load with Mooncake main: 0.3.13 TCP queue-full was the failure; with least-loaded routing L3 gives 1.36× throughput, 1.93× interactivity ([details](results/20261023_agentx/l3_mooncake_main.md)) |
+| Mooncake Store as L3 under the prefix cache | #20 | works under load (0.3.13 TCP queue-full was the failure; fixed by Mooncake main or two env defaults). Helps only when conversations move between ranks: 1.36× with least-loaded routing, +0.6% (none) with the headline's sticky routing ([least-loaded](results/20261023_agentx/l3_mooncake_main.md), [sticky](results/20261023_agentx/l3_sticky.md)) |
 | Mooncake `nvlink_intra` VMM buffers | #19 | brief for a separate agent |
 | Final report | #7 | interim snapshot |
 
