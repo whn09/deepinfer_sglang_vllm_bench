@@ -3,6 +3,8 @@
 #   docker build -f docker/Dockerfile.deepinfer-agentx --build-arg BASE=deepinfer:efa-b5a7378 -t deepinfer:agentx .
 # PD split (#18; adds upstream #195 + #197 on top):
 #   docker build -f docker/Dockerfile.deepinfer-agentx --build-arg PATCH=patches/deepinfer-pd-pr144-147-195-197.patch -t deepinfer:pd .
+# Upstream #147 v4 (EPLB off by default + prompt_tokenizer.py) + our synthetic AL / sticky routing / tracing:
+#   docker build -f docker/Dockerfile.deepinfer-agentx --build-arg PATCH=patches/deepinfer-agentx-v2-pr144-pr147upstream.patch -t deepinfer:agentx-v2 .
 ARG BASE=deepinfer:efa-b5a7378
 FROM ${BASE}
 ARG PATCH=patches/deepinfer-agentx-pr144-pr147-synthetic-al.patch
@@ -12,4 +14,4 @@ RUN cd /workspace/DeepInfer && git apply /tmp/agentx.patch && rm /tmp/agentx.pat
     && bash scripts/build.sh build > /tmp/deepinfer_c_build.log 2>&1 || (tail -40 /tmp/deepinfer_c_build.log; exit 1)
 # pd_server.py (#197): the CE frontend calls the PE over HTTP; --kv-transport mooncake needs the Transfer Engine
 # (deps: aiohttp/requests/msgpack only, torch untouched)
-RUN /opt/venv/bin/pip install -q httpx mooncake-transfer-engine-cuda13==0.3.13.post1
+RUN /opt/venv/bin/pip install -q httpx mooncake-transfer-engine-cuda13==0.3.13.post1 fastokens==0.3.4
