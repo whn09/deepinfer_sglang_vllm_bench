@@ -1,0 +1,532 @@
+From d005d1bdba7183f7c40ba7be185980f885517796 Mon Sep 17 00:00:00 2001
+From: whn09 <wanghenan09@gmail.com>
+Date: Fri, 23 Oct 2026 10:31:23 +0800
+Subject: [PATCH] serve: Mooncake Transfer Engine KV transport for the
+ prefill/decode split (--kv-transport mooncake)
+
+Stacked on #197 (pd_server.py / pd_transfer.py), which moves the prefilled KV blocks and SWA
+state PE -> CE as pinned host buffers over TCP. --kv-transport mooncake keeps that flow and
+control socket, and replaces the data plane with a Mooncake TransferEngine:
+
+- deepinfer/hicache/pd_mooncake.py: GpuArena (one registered device buffer per rank, first-fit
+  regions; cuMemAlloc like the KV pools, since expandable_segments memory has no cudaIpc
+  handle) and MooncakeLink (TransferEngine with P2PHANDSHAKE metadata, register_memory,
+  transfer_sync_write).
+- PDTransfer.export_into / admit accept device buffers: the PE exports a sequence straight
+  into an arena region (state included, no extra staging) and the CE admits from its arena.
+- pd_server.py: MC_MAGIC header -> CE reserves an arena region and replies {addr, segment}
+  (or busy -> retry) -> one contiguous write -> go/ok. Writes are retried, then the region is
+  sent over the TCP path, so a failing peer cannot strand a request. TCP is unchanged and is
+  also the fallback when the PE arena is full.
+- --mooncake-protocol nvlink_intra (default, one host) or rdma/efa across hosts.
+- serve/README.md: usage; containers must share IPC and PID namespaces (--pid=host).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ deepinfer/hicache/pd_mooncake.py | 106 +++++++++++++++++++++
+ deepinfer/hicache/pd_transfer.py |  32 +++++--
+ serve/README.md                  |  33 +++++++
+ serve/pd_server.py               | 158 ++++++++++++++++++++++++++++---
+ 4 files changed, 309 insertions(+), 20 deletions(-)
+ create mode 100644 deepinfer/hicache/pd_mooncake.py
+
+diff --git a/deepinfer/hicache/pd_mooncake.py b/deepinfer/hicache/pd_mooncake.py
+new file mode 100644
+index 0000000..c69376e
+--- /dev/null
++++ b/deepinfer/hicache/pd_mooncake.py
+@@ -0,0 +1,106 @@
++"""Mooncake Transfer Engine data plane for the prefill/decode split (serve/pd_server.py --kv-transport mooncake).
++
++Each engine rank registers one GPU arena with a Mooncake TransferEngine. The prefill engine exports a sequence
++(KV pages + full "to CE" state, PDTransfer.export_into) into a region of its arena and moves it with one
++contiguous write into a region the decode rank reserved in its own arena; the decode rank admits from there with
++the same page-copy kernels as the TCP path. Control messages (header, reservation, completion) stay on the TCP
++socket of the TCP path. Within a node this is Mooncake's nvlink_intra transport (CUDA IPC + copy engines); across
++hosts the same code runs over RDMA / EFA.
++"""
++
++from __future__ import annotations
++
++import os
++import threading
++
++import torch
++
++ALIGN = 4096
++
++
++def _align(n: int, a: int = ALIGN) -> int:
++    return (n + a - 1) // a * a
++
++
++class GpuArena:
++    """One device buffer with a first-fit allocator (thread-safe). Regions are ALIGN-aligned."""
++
++    def __init__(self, nbytes: int, device: torch.device) -> None:
++        self.nbytes = _align(nbytes)
++        # Not torch.empty: the worker runs PyTorch with expandable_segments (worker/base.py), whose VMM memory has no
++        # cudaIpc handle, and Mooncake's nvlink_intra transport registers buffers with cudaIpcGetMemHandle. Use the
++        # same legacy cuMemAlloc path as the KV pools (CacheEngine._alloc_gpu_uint8).
++        try:
++            from deepinfer._C import cuda_utils  # pyright: ignore[reportMissingModuleSource]
++
++            raw = cuda_utils.alloc_tensor(self.nbytes)
++            if raw is None:
++                raise MemoryError(f"cuMemAlloc of a {self.nbytes >> 20} MiB PD arena failed (lower --pd-arena-gb)")
++            self.buf = raw.view(torch.uint8).reshape(-1)
++        except ImportError:  # outside a DeepInfer build (unit tests)
++            self.buf = torch.empty(self.nbytes, dtype=torch.uint8, device=device)
++        assert self.buf.numel() == self.nbytes, (self.buf.numel(), self.nbytes)
++        self.base: int = self.buf.data_ptr()
++        self._free: list[tuple[int, int]] = [(0, self.nbytes)]  # sorted, coalesced (offset, size)
++        self._lock = threading.Lock()
++
++    def alloc(self, n: int) -> int | None:
++        n = _align(n)
++        with self._lock:
++            for i, (off, size) in enumerate(self._free):
++                if size >= n:
++                    if size == n:
++                        del self._free[i]
++                    else:
++                        self._free[i] = (off + n, size - n)
++                    return off
++        return None
++
++    def release(self, off: int, n: int) -> None:
++        n = _align(n)
++        with self._lock:
++            free = self._free
++            i = 0
++            while i < len(free) and free[i][0] < off:
++                i += 1
++            free.insert(i, (off, n))
++            if i + 1 < len(free) and off + n == free[i + 1][0]:  # merge with the next
++                free[i] = (off, n + free[i + 1][1])
++                del free[i + 1]
++            if i > 0 and free[i - 1][0] + free[i - 1][1] == off:  # merge with the previous
++                free[i - 1] = (free[i - 1][0], free[i - 1][1] + free[i][1])
++                del free[i]
++
++    def view(self, off: int, n: int) -> torch.Tensor:
++        return self.buf[off : off + n]
++
++
++def region_layout(num_pages: int, page_bytes: int, state_bytes: int) -> tuple[int, int]:
++    """(state offset, total bytes) of a transfer region: pages first, then the state."""
++    state_off = _align(num_pages * page_bytes, 256)
++    return state_off, state_off + state_bytes
++
++
++class MooncakeLink:
++    """A TransferEngine bound to one arena. hostname is the address peers use to reach this engine's handshake
++    server (P2PHANDSHAKE metadata: no etcd); the resulting segment name is hostname:rpc_port."""
++
++    def __init__(self, hostname: str, protocol: str, arena: GpuArena, device_name: str = "") -> None:
++        if protocol == "nvlink_intra":
++            os.environ.setdefault("MC_INTRANODE_NVLINK", "true")
++        from mooncake.engine import TransferEngine  # optional dependency: pip install mooncake-transfer-engine[-cuda13]
++
++        self.te = TransferEngine()
++        rc = self.te.initialize(hostname, "P2PHANDSHAKE", protocol, device_name)
++        if rc != 0:
++            raise RuntimeError(f"Mooncake TransferEngine.initialize({hostname!r}, {protocol!r}) failed: {rc}")
++        self.segment = f"{hostname}:{self.te.get_rpc_port()}"
++        rc = self.te.register_memory(arena.base, arena.nbytes)
++        if rc != 0:
++            raise RuntimeError(f"Mooncake register_memory({arena.nbytes} bytes) failed: {rc}")
++        self.arena = arena
++
++    def write(self, segment: str, src_off: int, dst_addr: int, n: int) -> None:
++        rc = self.te.transfer_sync_write(segment, self.arena.base + src_off, dst_addr, n)
++        if rc != 0:
++            raise RuntimeError(f"Mooncake transfer_sync_write to {segment} ({n} bytes) failed: {rc}")
+diff --git a/deepinfer/hicache/pd_transfer.py b/deepinfer/hicache/pd_transfer.py
+index abc69e1..09f5a4e 100644
+--- a/deepinfer/hicache/pd_transfer.py
++++ b/deepinfer/hicache/pd_transfer.py
+@@ -74,27 +74,40 @@ class PDTransfer:
+         """
+         if prompt_len is None:
+             prompt_len = seq.get_len() - 1
+-        num_blocks = (prompt_len + self.block_size - 1) // self.block_size
++        pages = torch.empty((self.num_blocks(prompt_len), self.page_bytes), dtype=torch.uint8, pin_memory=True)
++        state = torch.empty(self.state_bytes, dtype=torch.uint8, pin_memory=True)
++        return pages, state, self.export_into(seq, prompt_len, pages, state)
++
++    def num_blocks(self, prompt_len: int) -> int:
++        return (prompt_len + self.block_size - 1) // self.block_size
++
++    def export_into(self, seq: Sequence, prompt_len: int, pages: torch.Tensor, state: torch.Tensor) -> torch.cuda.Event:
++        """export() into caller-provided buffers: pages [num_blocks(prompt_len), page_bytes] and state [state_bytes],
++        pinned host or device memory (e.g. a region of a Mooncake-registered arena, pd_mooncake.GpuArena)."""
++        num_blocks = pages.size(0)
+         block_table = list(seq.block_table)[:num_blocks]
+-        pages = torch.empty((num_blocks, self.page_bytes), dtype=torch.uint8, pin_memory=True)
+         self.kernel.copy_pages(
+             self.gpu_blocks.data_ptr(), pages.data_ptr(), self._ids(block_table), self._ids(list(range(num_blocks))), self.page_bytes
+         )
+-        state = torch.empty(self.state_bytes, dtype=torch.uint8, pin_memory=True)
++        ev = torch.cuda.Event()
++        if state.is_cuda:
++            GPUCacheInterface.select_state_slice_to_store(seq.state_id, prompt_len, self.gpu_states, state_tensor=state, TO_CE=True)
++            ev.record()
++            return ev
+         staging = torch.empty(self.state_bytes, dtype=torch.uint8, device=self.device)
+         GPUCacheInterface.select_state_slice_to_store(seq.state_id, prompt_len, self.gpu_states, state_tensor=staging, TO_CE=True)
+         self.kernel.copy_pages(staging.data_ptr(), state.data_ptr(), self._ids([0]), self._ids([0]), self.state_bytes)
+-        ev = torch.cuda.Event()
+         ev.record()
+         # keep the staging alive until the copy ran (same-stream ordering makes later reuse safe)
+         ev.staging = staging  # type: ignore[attr-defined]
+-        return pages, state, ev
++        return ev
+ 
+     # ---------------------------------------------------------------- decode side
+ 
+     def admit(self, seq: Sequence, pages: torch.Tensor, state: torch.Tensor, prompt_len: int) -> torch.cuda.Event:
+         """Fill a freshly created sequence (prompt + first token, created with add_request(enqueue=False)) from
+-        pinned buffers and put it in the scheduler's prompted queue. Caller must have called try_allocate_seq.
++        pinned host or device buffers and put it in the scheduler's prompted queue. Caller must have called
++        try_allocate_seq, and must keep `pages`/`state` alive until the returned event has completed.
+ 
+         prompt_len: tokens with KV in `pages` (= seq.get_len() - 1); the state ring ends there.
+         """
+@@ -108,8 +121,11 @@ class PDTransfer:
+             self._ids(block_table[:num_blocks]),
+             self.page_bytes,
+         )
+-        staging = torch.empty(self.state_bytes, dtype=torch.uint8, device=self.device)
+-        self.kernel.copy_pages(state.data_ptr(), staging.data_ptr(), self._ids([0]), self._ids([0]), self.state_bytes)
++        if state.is_cuda:
++            staging = state
++        else:
++            staging = torch.empty(self.state_bytes, dtype=torch.uint8, device=self.device)
++            self.kernel.copy_pages(state.data_ptr(), staging.data_ptr(), self._ids([0]), self._ids([0]), self.state_bytes)
+         load_state_from_ce_transfer(seq.state_id, prompt_len, staging, self.gpu_states)
+         seq.num_cached_tokens = prompt_len
+         seq.cached_hit_tokens = prompt_len
+diff --git a/serve/README.md b/serve/README.md
+index a362759..d1240de 100644
+--- a/serve/README.md
++++ b/serve/README.md
+@@ -61,3 +61,36 @@ serve/pd_run.sh stop  <pe-host> <ce-host>
+ 
+ `serve/nccl_xtray_test.py` reports the transport and bandwidth NCCL picks between the two hosts.
+ Results on 4+4 GB300 vs a single 4-GPU tray: `doc/benchmark_gb300.md`.
++
++### KV transport: Mooncake Transfer Engine (`--kv-transport mooncake`)
++
++`--kv-transport mooncake` (both roles) moves the KV blocks and SWA state with a
++[Mooncake](https://github.com/kvcache-ai/Mooncake) `TransferEngine` instead of pinned host buffers over TCP
++(`deepinfer/hicache/pd_mooncake.py`).
++- Each rank registers one GPU arena (`--pd-arena-gb`, default 4).
++- The PE exports a sequence into a region of its arena (`PDTransfer.export_into`) and writes it with one contiguous
++  `transfer_sync_write` into a region the CE rank reserved in its own arena.
++- The CE admits from there with the same page-copy kernels.
++- Control (header, reservation, completion) stays on the KV socket. Each write is retried, then falls back to the
++  TCP path, so a failing peer cannot strand a request.
++
++`--mooncake-protocol` picks the transport: `nvlink_intra` (default; PE and CE on one host, CUDA IPC + copy engines),
++or `rdma` / `efa` across hosts. Use `--mooncake-device` for the NICs and `--mooncake-host` for the address peers
++use for the handshake.
++
++```bash
++pip install mooncake-transfer-engine-cuda13   # or mooncake-transfer-engine for CUDA 12
++# one 8-GPU host: PE on GPUs 0-3, CE on GPUs 4-7
++python serve/pd_server.py --role pe --port 8889 --kv-transport mooncake --mooncake-host 127.0.0.1 ...
++python serve/pd_server.py --role ce --port 8888 --kv-port 8900 --kv-host 127.0.0.1 --pe-url http://127.0.0.1:8889 \
++    --kv-transport mooncake --mooncake-host 127.0.0.1 ...
++```
++
++Notes for `nvlink_intra`:
++- **Allocation.** The arena is allocated with `cuMemAlloc` (`cuda_utils.alloc_tensor`, like the KV pools), not
++  `torch.empty`. The worker runs PyTorch with `expandable_segments` (`deepinfer/worker/base.py`), and that VMM memory
++  has no cudaIpc handle.
++- **Containers.** If PE and CE run in separate containers, share the IPC **and** PID namespaces
++  (`docker run --ipc=host --pid=host`). A CUDA IPC handle carries the exporter's PID. With per-container PID
++  namespaces, the PE's and CE's rank-r workers get the same PID, and `cudaIpcOpenMemHandle` rejects the peer handle
++  as its own ("invalid device context"). Only the same-index rank pairs fail.
+diff --git a/serve/pd_server.py b/serve/pd_server.py
+index d94672e..c9e1204 100644
+--- a/serve/pd_server.py
++++ b/serve/pd_server.py
+@@ -47,6 +47,29 @@ sys.path.insert(0, str(HERE.parent / "examples"))
+ import openai_server as oas  # noqa: E402  (the single-engine server: prompt rendering, detokenizer, frontend plumbing)
+ 
+ HDR = struct.Struct("<16sqqqqq")  # rid(16 bytes hex) | first_token | prompt_len | num_pages | page_bytes | state_bytes
++# --kv-transport mooncake: MC_MAGIC + HDR; CE replies one JSON line {"status": ok|busy|error, "addr", "segment"};
++# after the TransferEngine write the PE sends b"go" (or b"xx" on failure) and the CE answers b"ok".
++MC_MAGIC = b"MCK1"  # cannot start a TCP-path header (rids are hex)
++MC_RETRY_S = 0.005
++MC_WRITE_ATTEMPTS = 3  # then fall back to TCP for that transfer, so a failing peer never strands a request
++
++
++def _mooncake_link(args: argparse.Namespace, device):  # noqa: ANN001, ANN202
++    from deepinfer.hicache.pd_mooncake import GpuArena, MooncakeLink
++
++    arena = GpuArena(int(args.pd_arena_gb * 2**30), device)
++    host = args.mooncake_host or (args.kv_host if args.role == "ce" and args.kv_host else socket.gethostbyname(socket.gethostname()))
++    return MooncakeLink(host, args.mooncake_protocol, arena, args.mooncake_device)
++
++
++def _recv_line(sock: socket.socket) -> bytes:
++    out = bytearray()
++    while not out.endswith(b"\n"):
++        chunk = sock.recv(1)
++        if not chunk:
++            raise ConnectionError("connection closed")
++        out += chunk
++    return bytes(out)
+ 
+ 
+ def parse_args() -> argparse.Namespace:
+@@ -71,6 +94,18 @@ def parse_args() -> argparse.Namespace:
+     p.add_argument("--hicache-state-slots", type=int, default=4096)
+     p.add_argument("--routing", default="affinity", choices=["affinity", "least-loaded"])
+     p.add_argument("--prefill-any-interval", type=int, default=2)
++    p.add_argument(
++        "--kv-transport",
++        default="tcp",
++        choices=["tcp", "mooncake"],
++        help="KV/state data plane PE -> CE. tcp: pinned host buffers over the KV socket. mooncake: GPU arena to GPU "
++        "arena through a Mooncake TransferEngine (nvlink_intra within a node, rdma/efa across hosts); the KV socket "
++        "carries only control messages",
++    )
++    p.add_argument("--mooncake-protocol", default="nvlink_intra", help="TransferEngine protocol (nvlink_intra, rdma, efa, tcp)")
++    p.add_argument("--mooncake-device", default="", help="TransferEngine device name(s) for rdma/efa (empty: auto)")
++    p.add_argument("--mooncake-host", default=None, help="address peers use for this rank's TransferEngine handshake")
++    p.add_argument("--pd-arena-gb", type=float, default=4, help="mooncake: GPU staging arena per rank (PE send / CE receive)")
+     return p.parse_args()
+ 
+ 
+@@ -159,6 +194,7 @@ def _pe_loop(
+ 
+         cache = HostPrefixCache(engine, size_bytes=int(args.hicache_size_gb * 2**30), num_state_slots=args.hicache_state_slots)
+ 
++    link = _mooncake_link(args, transfer.device) if args.kv_transport == "mooncake" else None
+     targets: dict[str, tuple[str, int]] = {}  # rid -> (host, port) of the CE rank
+     awaiting_token: dict[str, dict] = {}  # rid -> transfer waiting for the step's sampled first token
+     send_q: queue.Queue = queue.Queue()
+@@ -178,10 +214,24 @@ def _pe_loop(
+                 out_q.put(("error", rid, f"prefilled sequence has {len(seq.block_table)} blocks, needs {need}"))
+                 targets.pop(rid, None)
+                 continue
+-            pages, state, ev = transfer.export(seq, prompt_len)
++            region = None
++            if link is not None:
++                from deepinfer.hicache.pd_mooncake import region_layout
++
++                nb = transfer.num_blocks(prompt_len)
++                state_off, total = region_layout(nb, transfer.page_bytes, transfer.state_bytes)
++                off = link.arena.alloc(total)
++                if off is not None:  # else: arena full, this one goes over TCP
++                    region = (off, total)
++                    pages = link.arena.view(off, nb * transfer.page_bytes).view(nb, transfer.page_bytes)
++                    state = link.arena.view(off + state_off, transfer.state_bytes)
++                    ev = transfer.export_into(seq, prompt_len, pages, state)
++            if region is None:
++                pages, state, ev = transfer.export(seq, prompt_len)
+             item = {
+                 "pages": pages,
+                 "state": state,
++                "region": region,
+                 "event": ev,
+                 "prompt_len": prompt_len,
+                 "target": targets.pop(rid),
+@@ -193,7 +243,43 @@ def _pe_loop(
+ 
+     engine.pe_do_save_kvcache = on_prefill_step
+ 
++    def send_mooncake(rid: str, item: dict, host: str, port: int) -> None:
++        pages, state = item["pages"], item["state"]
++        hdr = MC_MAGIC + HDR.pack(rid.encode()[:16], item["first_token"], item["prompt_len"], pages.size(0), pages.size(1), state.numel())
++        off, total = item["region"]
++        deadline = time.monotonic() + 600
++        while True:
++            with socket.create_connection((host, port), timeout=60) as s:
++                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
++                s.sendall(hdr)
++                resv = json.loads(_recv_line(s))
++                if resv["status"] == "ok":
++                    for attempt in range(MC_WRITE_ATTEMPTS):
++                        try:
++                            link.write(resv["segment"], off, resv["addr"], total)
++                            break
++                        except Exception as e:  # noqa: BLE001
++                            print(
++                                f"[pe rank {dp_rank}] mooncake write to {resv['segment']} failed (attempt {attempt + 1}): {e!r}", flush=True
++                            )
++                            time.sleep(0.01 * (attempt + 1))
++                    else:
++                        s.sendall(b"xx")
++                        return False  # caller falls back to TCP
++                    s.sendall(b"go")
++                    ack = s.recv(2)
++                    if ack != b"ok":
++                        raise RuntimeError(f"CE rejected transfer: {ack!r}")
++                    return True
++                if resv["status"] != "busy" or time.monotonic() > deadline:
++                    raise RuntimeError(f"CE reservation failed: {resv}")
++            time.sleep(MC_RETRY_S)  # CE arena full: retry once it has admitted something
++
+     def sender():
++        if link is not None:
++            import torch
++
++            torch.cuda.set_device(transfer.device)  # TransferEngine copies use the calling thread's device
+         while True:
+             rid, item = send_q.get()
+             host, port = item["target"]
+@@ -202,6 +288,16 @@ def _pe_loop(
+                 if item["first_token"] is None:
+                     raise RuntimeError("no first token produced for the prefilled sequence")
+                 item["event"].synchronize()
++                if item["region"] is not None:
++                    try:
++                        sent = send_mooncake(rid, item, host, port)
++                        if not sent:  # copy the region to pinned host buffers and use the TCP path below
++                            item["pages"] = item["pages"].to("cpu").pin_memory()
++                            item["state"] = item["state"].to("cpu").pin_memory()
++                    finally:
++                        link.arena.release(*item["region"])
++                    if sent:
++                        continue
+                 pages, state = item["pages"], item["state"]
+                 with socket.create_connection((host, port), timeout=60) as s:
+                     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+@@ -313,7 +409,8 @@ def _ce_loop(
+ ) -> None:
+     import torch
+ 
+-    recv_q: queue.Queue = queue.Queue()  # (rid, first_token, prompt_len, pages, state)
++    recv_q: queue.Queue = queue.Queue()  # (rid, first_token, prompt_len, pages, state, arena region or None)
++    link = _mooncake_link(args, transfer.device) if args.kv_transport == "mooncake" else None
+ 
+     def receiver():
+         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+@@ -324,19 +421,47 @@ def _ce_loop(
+             conn, _ = srv.accept()
+             threading.Thread(target=receive_one, args=(conn,), daemon=True).start()
+ 
++    def receive_mooncake(conn: socket.socket, rid: str, first_token: int, prompt_len: int, num_pages: int) -> None:
++        from deepinfer.hicache.pd_mooncake import region_layout
++
++        state_off, total = region_layout(num_pages, transfer.page_bytes, transfer.state_bytes)
++        off = link.arena.alloc(total) if link is not None else None
++        if off is None:
++            status = "busy" if link is not None and total <= link.arena.nbytes else "error"
++            conn.sendall(json.dumps({"status": status}).encode() + b"\n")
++            return
++        try:
++            conn.sendall(json.dumps({"status": "ok", "addr": link.arena.base + off, "segment": link.segment}).encode() + b"\n")
++            go = bytearray(2)
++            _recv_exact(conn, memoryview(go))
++            if go != b"go":
++                raise RuntimeError(f"PE aborted the transfer: {bytes(go)!r}")
++        except BaseException:
++            link.arena.release(off, total)
++            raise
++        pages = link.arena.view(off, num_pages * transfer.page_bytes).view(num_pages, transfer.page_bytes)
++        state = link.arena.view(off + state_off, transfer.state_bytes)
++        recv_q.put((rid, first_token, prompt_len, pages, state, (off, total)))
++        conn.sendall(b"ok")
++
+     def receive_one(conn: socket.socket):
+         try:
+             with conn:
+                 hdr = bytearray(HDR.size)
+-                _recv_exact(conn, memoryview(hdr))
++                _recv_exact(conn, memoryview(hdr)[: len(MC_MAGIC)])
++                mooncake = bytes(hdr[: len(MC_MAGIC)]) == MC_MAGIC
++                _recv_exact(conn, memoryview(hdr)[0 if mooncake else len(MC_MAGIC) :])
+                 rid_b, first_token, prompt_len, num_pages, page_bytes, state_bytes = HDR.unpack(hdr)
+                 rid = rid_b.decode()
+                 assert page_bytes == transfer.page_bytes and state_bytes == transfer.state_bytes, "layout mismatch between PE and CE"
++                if mooncake:
++                    receive_mooncake(conn, rid, first_token, prompt_len, num_pages)
++                    return
+                 pages = torch.empty((num_pages, page_bytes), dtype=torch.uint8, pin_memory=True)
+                 state = torch.empty(state_bytes, dtype=torch.uint8, pin_memory=True)
+                 _recv_exact(conn, memoryview(pages.numpy()).cast("B"))
+                 _recv_exact(conn, memoryview(state.numpy()).cast("B"))
+-                recv_q.put((rid, first_token, prompt_len, pages, state))
++                recv_q.put((rid, first_token, prompt_len, pages, state, None))
+                 conn.sendall(b"ok")
+         except Exception as e:  # noqa: BLE001
+             print(f"[ce rank {dp_rank}] transfer failed: {e!r}", flush=True)
+@@ -347,7 +472,12 @@ def _ce_loop(
+     expected: dict[str, dict] = {}  # rid -> {"prompt_token_ids", "sampling"} from the frontend
+     arrived: dict[str, tuple] = {}  # rid -> transfer
+     pending: collections.deque = collections.deque()  # rids with both parts, waiting for GPU allocation
+-    keep: dict[str, torch.cuda.Event] = {}
++    keep: dict[str, tuple] = {}  # rid -> (admit event, pages, state, arena region or None)
++
++    def release(region: tuple[int, int] | None) -> None:
++        if region is not None:
++            link.arena.release(*region)
++
+     inflight = False
+     while True:
+         while True:
+@@ -361,22 +491,24 @@ def _ce_loop(
+                     pending.append(rid)
+             elif kind == "abort":
+                 expected.pop(rid, None)
+-                arrived.pop(rid, None)
++                gone = arrived.pop(rid, None)
++                if gone is not None:
++                    release(gone[4])
+                 if rid in pending:
+                     pending.remove(rid)
+                 else:
+                     engine.abort_request(rid)
+         while True:
+             try:
+-                rid, first_token, prompt_len, pages, state = recv_q.get_nowait()
++                rid, first_token, prompt_len, pages, state, region = recv_q.get_nowait()
+             except queue.Empty:
+                 break
+-            arrived[rid] = (first_token, prompt_len, pages, state)
++            arrived[rid] = (first_token, prompt_len, pages, state, region)
+             if rid in expected:
+                 pending.append(rid)
+         while pending:
+             rid = pending[0]
+-            spec, (first_token, prompt_len, pages, state) = expected[rid], arrived[rid]
++            spec, (first_token, prompt_len, pages, state, region) = expected[rid], arrived[rid]
+             tokens = np.asarray(list(spec["prompt_token_ids"]) + [first_token], dtype=np.int32)
+             assert len(tokens) - 1 == prompt_len, (len(tokens), prompt_len)
+             sp = SamplingParams(**spec["sampling"])
+@@ -389,6 +521,7 @@ def _ce_loop(
+                 pending.popleft()
+                 expected.pop(rid, None)
+                 arrived.pop(rid, None)
++                release(region)
+                 continue
+             try:
+                 allocated = engine.scheduler.try_allocate_seq(seq)
+@@ -403,15 +536,16 @@ def _ce_loop(
+             if not allocated:
+                 if allocated is False:
+                     out_q.put(("error", rid, "cannot allocate KV blocks for the transferred sequence"))
++                release(region)
+                 continue
+             # Keep the pinned receive buffers alive until the H2D page-copy kernels have consumed them: the kernel
+             # reads them by raw pointer, so the caching host allocator would otherwise hand the memory to the next
+             # transfer (or unmap it) while the copy is still queued -> corrupted KV / cudaErrorLaunchFailure.
+-            keep[rid] = (transfer.admit(seq, pages, state, prompt_len), pages, state)
++            keep[rid] = (transfer.admit(seq, pages, state, prompt_len), pages, state, region)
+             if engine.multi_modal_processor is not None:
+                 engine.multi_modal_processor.add(rid, seq.multi_modal_data, prompt_len)
+-        for rid in [r for r, (ev, _, _) in keep.items() if ev.query()]:
+-            del keep[rid]
++        for rid in [r for r, k in keep.items() if k[0].query()]:
++            release(keep.pop(rid)[3])
+ 
+         if engine.has_unfinished_requests():
+             outputs = engine.step()
+-- 
+2.54.0 (Apple Git-157)
+
