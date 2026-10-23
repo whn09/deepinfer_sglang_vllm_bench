@@ -27,7 +27,7 @@ This repo compares three inference stacks serving `DeepSeek-V4.1-Flash-1017` on 
 | Fixed-length closed-loop comparison | #6 | sg-1k/8k/32k done |
 | DeepInfer TTFT breakdown and fix | #17 | done, upstreamed |
 | YoCo truncation (lossless?) | #16 | keep=140 changes greedy outputs; quality eval open |
-| PD split 4P+4D, Mooncake NVLink transport | #18 | TCP done; Mooncake short parity check running |
+| PD split 4P+4D, Mooncake NVLink transport | #18 | done: Mooncake = TCP (identical outputs, same perf); #214 ready for review |
 | Mooncake Store as L3 under the prefix cache | #20 | implemented, E2E validation queued |
 | Mooncake `nvlink_intra` VMM buffers | #19 | brief for a separate agent |
 | Final report | #7 | interim snapshot |
