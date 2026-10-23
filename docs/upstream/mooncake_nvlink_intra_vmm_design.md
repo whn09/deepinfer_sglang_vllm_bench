@@ -43,7 +43,7 @@ Task brief for an implementing agent. Target repo: [kvcache-ai/Mooncake](https:/
 
 ## 3. Facts verified on the target machine
 
-HGX B200 ×8 (`ssh B200-1`, temporary host), driver 595.91, CUDA 13.2, kernel 7.0.0-1014-aws, test container `deepinfer:nvidia-dev` (nvidia/cuda 13.2.1-devel). Probe sources: `bench/` in this repo and `/opt/dlami/nvme/bench_tmp/mc_pr/*.cu` on the host.
+HGX B200 ×8 (`ssh B200-1`, temporary host), driver 595.91, CUDA 13.2, kernel 7.0.0-1014-aws, test container `deepinfer:nvidia-dev` (nvidia/cuda 13.2.1-devel). Probe sources in this repo: `bench/cuda_probes/` (errcheck.cu, fabric_check.cu, vmm_layout.cu), `bench/mc_nvlink_probe.py`, `bench/mc_visibility_probe.py`.
 
 1. `CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED=1` and `..._HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED=1`.
 2. **FABRIC handles do not work here without IMEX:** `..._HANDLE_TYPE_FABRIC_SUPPORTED=1`, but `cuMemCreate` with `requestedHandleTypes=FABRIC` returns **800 (`CUDA_ERROR_NOT_PERMITTED`)**, and there is no `/dev/nvidia-caps-imex-channels`. So for single-node HGX the portable path is **POSIX file descriptors**; FABRIC is optional and needs an IMEX channel.
