@@ -1938,10 +1938,10 @@ index 0000000..f61a451
 +esac
 diff --git a/serve/pd_server.py b/serve/pd_server.py
 new file mode 100644
-index 0000000..92793ba
+index 0000000..ad8bd39
 --- /dev/null
 +++ b/serve/pd_server.py
-@@ -0,0 +1,825 @@
+@@ -0,0 +1,836 @@
 +"""Prefill/decode-disaggregated serving: a prompt-only engine tray (PE) and a decode-only engine tray (CE).
 +
 +    # decode tray (user-facing OpenAI API on --port, KV receivers on --kv-port + rank):
@@ -2050,6 +2050,14 @@ index 0000000..92793ba
 +    p.add_argument("--mooncake-device", default="", help="TransferEngine device name(s) for rdma/efa (empty: auto)")
 +    p.add_argument("--mooncake-host", default=None, help="address peers use for this rank's TransferEngine handshake")
 +    p.add_argument("--pd-arena-gb", type=float, default=4, help="mooncake: GPU staging arena per rank (PE send / CE receive)")
++    p.add_argument(
++        "--pair-ranks",
++        action="store_true",
++        help="ce: ask the PE to prefill on the PE rank with the same index as the chosen CE rank (needs equal --dp), so "
++        "every CE rank receives from exactly one PE rank. With mooncake nvlink_intra inside DeepInfer processes, a "
++        "second PE process opening the same CE arena handle was seen to fail (cudaIpcOpenMemHandle: invalid device "
++        "context); pairing avoids that",
++    )
 +    p.add_argument("--eplb-interval", type=int, default=30, help="see openai_server.py; 0 disables EPLB rearrangement")
 +    p.add_argument("--eplb-after-prefill", type=int, default=1, choices=[0, 1])
 +    return p.parse_args()
@@ -2568,6 +2576,8 @@ index 0000000..92793ba
 +            rank = int.from_bytes(key[:4], "little") % fe.args.dp
 +        elif fe.args.routing == "sticky-balanced" and key is not None:
 +            rank = fe._sticky_rank(key)
++        if body.get("pe_rank") is not None:  # CE --pair-ranks: the CE already chose (sticky) for this conversation
++            rank = int(body["pe_rank"]) % fe.args.dp
 +        fe.load[rank] += 1
 +        fe.owner[rid] = rank
 +        q: asyncio.Queue = asyncio.Queue()
@@ -2678,6 +2688,7 @@ index 0000000..92793ba
 +                    "sampling": sampling,
 +                    "kv_target": [kv_host, fe.args.kv_port + rank],
 +                    "affinity": key.hex() if key else None,
++                    "pe_rank": rank if fe.args.pair_ranks else None,
 +                },
 +            )
 +            if r.status_code != 200:

@@ -1,4 +1,4 @@
-<!-- Draft for deepseek-ai/DeepInfer#147. Not posted yet. -->
+<!-- Posted to deepseek-ai/DeepInfer#147: https://github.com/deepseek-ai/DeepInfer/pull/147#issuecomment-6355311603 -->
 **Prompt tokenization dominates TTFT p50 for long agentic prompts; `fastokens` removes it (same ids)**
 
 `Frontend.render_prompt` re-tokenizes the whole conversation on every turn with `tokenizer.encode`. For agentic traffic the prompt is 100K+ tokens at nearly every turn, so this is the largest single item in the server's TTFT once the prefix cache hits.
