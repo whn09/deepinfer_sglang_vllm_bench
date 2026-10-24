@@ -1,0 +1,7 @@
+# Thin layer over deepinfer:agentx-v3: DEEPINFER_DISABLE_MEGA_MOE switch (DeepEP dispatch + grouped GEMM + combine instead
+# of the fused mega MoE kernel), to compare low-concurrency decode latency (#21). Python-only.
+#   docker build -f docker/Dockerfile.deepinfer-nomega -t deepinfer:agentx-v3-nomega .
+ARG BASE=deepinfer:agentx-v3
+FROM ${BASE}
+COPY patches/deepinfer-disable-mega-moe.patch /tmp/nomega.patch
+RUN cd /workspace/DeepInfer && git apply /tmp/nomega.patch && rm /tmp/nomega.patch

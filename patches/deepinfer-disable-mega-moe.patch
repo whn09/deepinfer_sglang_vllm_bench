@@ -1,0 +1,25 @@
+diff --git a/deepinfer/environ.py b/deepinfer/environ.py
+index b8b6688..51a2499 100644
+--- a/deepinfer/environ.py
++++ b/deepinfer/environ.py
+@@ -178,6 +178,8 @@ class envs:
+     """NORMAL 引擎 prefill 尝试间隔（ALL 点：全员有活才做，逻辑见 scheduler.hpp _schedule）。
+     各 rank 在集体 prefill 前累积待处理的 prompt。"""
+     DEEPINFER_PREFILL_ANY_ATTEMPT_INTERVAL = EnvVar.int(default=100)
++    DEEPINFER_DISABLE_MEGA_MOE = EnvVar.bool()
++    "不用 DeepGEMM mega MoE 融合 kernel，改走 DeepEP dispatch + grouped GEMM + combine（低并发 decode 延迟对比用）"
+     DEEPINFER_PREFILL_QUORUM = EnvVar.int(default=0)
+     "NORMAL 引擎 QUORUM 投票点：至少这么多个 dp rank 有 prefill 活就集体做 prompt step；0 关闭"
+     DEEPINFER_PREFILL_QUORUM_INTERVAL = EnvVar.int(default=10)
+diff --git a/deepinfer/model_executor/models/v4_modules/mlp.py b/deepinfer/model_executor/models/v4_modules/mlp.py
+index e056539..82434e9 100644
+--- a/deepinfer/model_executor/models/v4_modules/mlp.py
++++ b/deepinfer/model_executor/models/v4_modules/mlp.py
+@@ -185,6 +185,7 @@ class DeepseekMoE(nn.Module):
+             (PLATFORM.is_gpu or self.mma_type == "fp8xfp4")
+             and self.mma_type in ("fp8xfp4", "fp8xfp8", "bf16xbf16")
+             and PG.is_within_nvl_domain(PG.expert_parallel_group())
++            and not envs.DEEPINFER_DISABLE_MEGA_MOE
+         )
+ 
+         self.ep_buffer: EPBuffer | None = None
