@@ -41,7 +41,7 @@ Ratios are against the stronger of SGLang (ours) and vLLM / SGLang (InferenceX) 
 **Caveats**
 - DeepInfer runs a patched tree: #144 prefix cache, #147 server, synthetic acceptance, sticky-balanced routing, the eager-pinning fix (`patches/deepinfer-agentx-v2-pr144-pr147upstream.patch`).
 - The c=32 point comes from a separate run with interval 100 (`deepinfer-ix-ep4-v3-c32pai100`); the series run used 30 (281 interactivity, 0.33 s TTFT).
-- A repeat of the c=128 / c=256 points is running to bound run-to-run variance of the narrow throughput lead.
+- **The c=128 / c=256 points reproduce.** A repeat 3600 s run gave c=128 176,217 tok/s/GPU / 170.9 interactivity (vs 175,862 / 170.6), and c=256 310,601 / 122.6 (vs 310,586 / 121.4). The run-to-run spread is within 0.2–1%, below the 2% lead.
 
 <details><summary>中文</summary>
 
@@ -72,5 +72,5 @@ Ratios are against the stronger of SGLang (ours) and vLLM / SGLang (InferenceX) 
 **注意事项**
 - DeepInfer 跑的是打了补丁的代码：#144 前缀缓存、#147 server、合成接受率、sticky-balanced 路由、提前 pin 内存的修复。
 - c=32 这个点来自另一次单独的运行，用的是间隔 100（`deepinfer-ix-ep4-v3-c32pai100`）；序列里那次用的是 30（interactivity 281，TTFT 0.33 s）。
-- c=128 / c=256 的重复测试正在跑，用来确认吞吐上这点微弱优势不是运行间的波动。
+- **c=128 / c=256 的结果可以复现：** 重新跑了一次 3600 s，c=128 是 176,217 tok/s/GPU / interactivity 170.9（第一次是 175,862 / 170.6），c=256 是 310,601 / 122.6（第一次是 310,586 / 121.4）。两次运行之间的差异在 0.2–1% 以内，比 2% 的领先幅度小。
 </details>
