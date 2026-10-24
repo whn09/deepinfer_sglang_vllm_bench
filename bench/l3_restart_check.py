@@ -58,7 +58,11 @@ def main() -> None:
     p.add_argument("--doc-tokens", type=int, default=20000)
     p.add_argument("--max-tokens", type=int, default=128)
     p.add_argument("--dump", help="check: write the full cached / uncached outputs here (JSON)")
+    p.add_argument("--warmup", type=int, default=0,
+                   help="send this many short distinct uncached requests first, so the timed request is not a rank's first")
     a = p.parse_args()
+    for i in range(a.warmup):
+        chat(a.port, a.model, [{"role": "user", "content": f"warmup {i}: " + " ".join(WORDS) * 50}], 8, False)
     doc = " ".join(f"{WORDS[i % len(WORDS)]}{i % 97}" for i in range(a.doc_tokens))
     turn1 = [{"role": "user", "content": f"{doc}\n\nWhich word comes right after 'gamma2'? Answer briefly."}]
     if a.phase == "populate":
@@ -70,6 +74,7 @@ def main() -> None:
     turn2 = turn1 + [{"role": "assistant", "content": st["answer1"]}, {"role": "user", "content": "And which word comes right before it?"}]
     before = counters(a.port)
     cached, t_cached = chat(a.port, a.model, turn2, a.max_tokens, True)
+    time.sleep(6)  # the server publishes hicache stats every 5 s
     after = counters(a.port)
     uncached, t_uncached = chat(a.port, a.model, turn2, a.max_tokens, False)
     if a.dump:
