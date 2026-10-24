@@ -17,7 +17,8 @@ AL="${IX_SYNTHETIC_AL:-3.51}"
 bash "$BENCH_ROOT/scripts/wait_gpus_free.sh" "$(seq -s, $OFFSET $((OFFSET + 3)))" || exit 1
 docker rm -f "$NAME" > /dev/null 2>&1 || true
 # DI_L3=1: Mooncake Store L3 under the host prefix cache (#20; needs deepinfer:agentx-l3 and scripts/serve_mooncake_store.sh)
-L3_ARGS=(); [ "${DI_L3:-0}" = 1 ] && L3_ARGS=(-e 'DEEPINFER_HICACHE_MOONCAKE_STORE={"local_hostname":"127.0.0.1","metadata_server":"http://127.0.0.1:18080/metadata","master_server_addr":"127.0.0.1:50551","protocol":"tcp","global_segment_size":0}')
+# DI_L3_PROTOCOL tcp|efa (efa: Mooncake main build, DI_L3_DEVICES = EFA devices for the engine-side clients)
+L3_ARGS=(); [ "${DI_L3:-0}" = 1 ] && L3_ARGS=(-e "DEEPINFER_HICACHE_MOONCAKE_STORE={\"local_hostname\":\"127.0.0.1\",\"metadata_server\":\"http://127.0.0.1:18080/metadata\",\"master_server_addr\":\"127.0.0.1:50551\",\"protocol\":\"${DI_L3_PROTOCOL:-tcp}\",\"device_name\":\"${DI_L3_DEVICES:-}\",\"global_segment_size\":0}")
 # DI_JIT_CACHE: persistent TileLang / DeepGEMM / DeepEP JIT cache on the host (default $WORK/cache/deepinfer_jit; "0" = off).
 # Without it every fresh container recompiles: the first requests take 88-170 s and new shapes add 12-14 s spikes later.
 JIT_DIR="${DI_JIT_CACHE:-$WORK/cache/deepinfer_jit}"; JIT_ARGS=()
