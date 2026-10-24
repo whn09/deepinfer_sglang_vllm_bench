@@ -22,13 +22,16 @@ L3_ARGS=(); [ "${DI_L3:-0}" = 1 ] && L3_ARGS=(-e 'DEEPINFER_HICACHE_MOONCAKE_STO
 # Without it every fresh container recompiles: the first requests take 88-170 s and new shapes add 12-14 s spikes later.
 JIT_DIR="${DI_JIT_CACHE:-$WORK/cache/deepinfer_jit}"; JIT_ARGS=()
 [ "$JIT_DIR" != 0 ] && mkdir -p "$JIT_DIR" && JIT_ARGS=(-e DEEPINFER_JIT_CACHE_DIR=/jit -v "$JIT_DIR":/jit)
+# DI_EXTRA_EXPERTS: redundant experts (DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS; the server defaults to 32). They only
+# matter for EPLB rearrangement; with EPLB off, 0 makes the decode step 4-5% faster (#21 W2).
+EXP_ARGS=(); [ -n "${DI_EXTRA_EXPERTS:-}" ] && EXP_ARGS=(-e "DEEPINFER_OVERRIDE_NUM_EXTRA_EXPERTS=$DI_EXTRA_EXPERTS")
 TRACE_ARGS=(); [ -n "${DI_TRACE:-}" ] && TRACE_ARGS=(-e "DEEPINFER_SERVER_TRACE=/trace/$(basename "$DI_TRACE")" -v "$(dirname "$DI_TRACE")":/trace)
 # --privileged 下选卡靠 DEVICE_OFFSET（DeepInfer 自己设 CUDA_VISIBLE_DEVICES）；两个实例并行时 MASTER_PORT 要错开
 docker run -d --name "$NAME" --gpus all --privileged --ipc=host --network host --shm-size 32g --ulimit memlock=-1 \
     -e DEVICE_OFFSET=$OFFSET -e MASTER_PORT=$MPORT \
     -e NCCL_GIN_TYPE=5 -e "NCCL_IB_HCA=^=ibp115s0f0,ibp116s0f0" \
     -e DEEPINFER_USE_NEXTN_DECODE=5 -e DEEPINFER_SIMULATE_ACC_LEN="$AL" -e DEEPINFER_TOKENIZE_VERIFY="${DI_TOKENIZE_VERIFY:-0}" \
-    -e DEEPINFER_HF_MODEL_DIR=/model -v "$MODEL_DIR":/model:ro "${TRACE_ARGS[@]}" "${L3_ARGS[@]}" "${JIT_ARGS[@]}" \
+    -e DEEPINFER_HF_MODEL_DIR=/model -v "$MODEL_DIR":/model:ro "${TRACE_ARGS[@]}" "${L3_ARGS[@]}" "${JIT_ARGS[@]}" "${EXP_ARGS[@]}" \
     "${DI_IMAGE:-deepinfer:agentx}" python -u serve/openai_server.py --model /model --served-model-name "$SERVED_MODEL_NAME" \
         --dp 4 --port "$PORT" --thinking-mode "${DI_THINKING:-thinking}" --hicache-size-gb "${DI_HICACHE_GB:-32}" \
         --routing "${DI_ROUTING:-sticky-balanced}" \
