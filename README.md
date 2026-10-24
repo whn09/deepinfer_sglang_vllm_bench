@@ -2,19 +2,18 @@
 
 This repo compares three inference stacks serving `DeepSeek-V4.1-Flash-1017` on one 8×B200 box: same weights, same inputs, same metrics. The primary workload is the [InferenceX](https://inferencex.semianalysis.com/inference/deepseek-v41-flash?i_xmode=interactivity&i_seq=agentic-traces&i_prec=fp8) **AgentX** benchmark, and we first reproduce the published B200 points before comparing anything.
 
-**Goal: [#21](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/21)** (DeepInfer ≥ vLLM / SGLang on AgentX, full Mooncake integration). **Roadmap and status: [#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8).** **Latest results: [`results/20261023_agentx/summary.md`](results/20261023_agentx/summary.md).**
+**Goal: [#21](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/21)** (DeepInfer ≥ vLLM / SGLang on AgentX, full Mooncake integration). **Roadmap and status: [#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8).** **Latest results: [`results/20261024_agentx_v3/summary.md`](results/20261024_agentx_v3/summary.md).**
 
 ## Results (AgentX, 4 GPUs per server, 3600 s per point)
 
-![pareto](results/20261023_agentx/agentx_pareto.png)
-![ttft](results/20261023_agentx/agentx_ttft.png)
+![pareto](results/20261024_agentx_v3/agentx_pareto.png)
+![ttft](results/20261024_agentx_v3/agentx_ttft.png)
 
 - **The reproduction matches InferenceX.** Our vLLM TP4 runs match all 7 published points (throughput 0.95–1.02×). Our SGLang runs match all 12 published points (0.98–1.06×), including DEP4 + HiCache.
 - **DeepInfer with the #147 server defaults was 2–5× behind** because EPLB rearrangement was hard-wired on (#5). It is fixed upstream (EPLB off by default).
 - **DeepInfer TTFT was 3–4× vLLM's** because HF `tokenizers` re-encoded the whole conversation on every turn (#17). With `fastokens`, as vLLM's Rust frontend uses, it is within 10–40 ms of vLLM. This is now upstream in #147 as `--tokenizer-backend`.
-- **DeepInfer today**, vs vLLM TP4:
-  - throughput 0.97–0.98× at c ≥ 16;
-  - interactivity 0.62–0.76× at c ≤ 16 (DP attention gives one request one GPU) and 0.92–0.95× at c ≥ 64.
+- **Tuned DeepInfer (v3, #21) beats both SGLang and vLLM at c ≥ 128** (throughput 1.02×, interactivity 1.15–1.45×) and is within 1–3% on throughput at c=32–64. The main lever: `--prefill-any-interval 100` instead of #147's 2 (a prompt step pauses every DP rank's decode), plus 0 redundant experts with EPLB off. The cost is higher TTFT at high concurrency.
+- **At c ≤ 16 DeepInfer trails TP4 (interactivity ~0.6×).** This is structural: EP-only MoE puts a ~13 ms floor on a decode step.
 - **SGLang** has the highest throughput at high concurrency, but its TTFT is 1.3–1.6 s on the DEP4 points.
 - **DeepInfer PD 4P+4D** (8 GPUs, #18) gives the best per-user speed at c ≥ 64, at about half the throughput per GPU.
 
@@ -127,16 +126,15 @@ results/   one directory per run; inferencex_public/ = published InferenceX poin
 
 本仓库在一台 8×B200 上对比三个推理框架运行 `DeepSeek-V4.1-Flash-1017` 的表现：同一份权重、同一批输入、同一套指标。主要负载是 InferenceX 的 **AgentX** benchmark，比较之前先复现官方公布的 B200 数据点。
 
-**总目标：[#21](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/21)（AgentX 上 DeepInfer 达到或超过 vLLM / SGLang，并与 Mooncake 充分整合）。Roadmap 和进度：[#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8)。最新结果：[`results/20261023_agentx/summary.md`](results/20261023_agentx/summary.md)。**
+**总目标：[#21](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/21)（AgentX 上 DeepInfer 达到或超过 vLLM / SGLang，并与 Mooncake 充分整合）。Roadmap 和进度：[#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8)。最新结果：[`results/20261024_agentx_v3/summary.md`](results/20261024_agentx_v3/summary.md)。**
 
 ## 结果（AgentX，每个 server 4 卡，每点 3600 s）
 
 - **复现结果与 InferenceX 一致：** 我们跑的 vLLM TP4 与官方 7 个点全部对上（吞吐 0.95–1.02×）；SGLang 与官方 12 个点全部对上（0.98–1.06×），包括 DEP4 + HiCache。
 - **DeepInfer 用 #147 server 的默认配置时落后 2–5 倍：** 原因是 EPLB 重排被写死开启（#5）。上游已修复，现在默认关闭 EPLB。
 - **DeepInfer 的 TTFT 曾是 vLLM 的 3–4 倍：** 原因是每一轮都用 HF `tokenizers` 把整段对话重新编码（#17）。改用 vLLM Rust 前端同款的 `fastokens` 后，和 vLLM 只差 10–40 ms。这已经以 `--tokenizer-backend` 参数的形式合入上游 #147。
-- **DeepInfer 现状**（相对 vLLM TP4）：
-  - c ≥ 16 时吞吐 0.97–0.98×；
-  - interactivity 在 c ≤ 16 时为 0.62–0.76×（DP attention 下一个请求只用一张卡），c ≥ 64 时为 0.92–0.95×。
+- **调优后的 DeepInfer（v3，#21）在 c ≥ 128 时超过了 SGLang 和 vLLM**（吞吐 1.02 倍，interactivity 1.15–1.45 倍），c=32–64 时吞吐只差 1–3%。主要杠杆是把 #147 设的 `--prefill-any-interval 2` 改成 100（每次 prompt step 都会打断所有 DP rank 的 decode），以及在 EPLB 关闭时把冗余专家设为 0。代价是高并发下 TTFT 更高。
+- **c ≤ 16 时 DeepInfer 落后于 TP4（interactivity 约 0.6 倍）。** 这是结构性的：只有 EP 方式的 MoE，decode 单步有约 13 ms 的下限。
 - **SGLang：** 高并发下吞吐最高，但 DEP4 各点的 TTFT 有 1.3–1.6 s。
 - **DeepInfer PD 4P+4D**（8 卡，#18）：c ≥ 64 时每用户速度最快，代价是每卡吞吐约减半。
 
