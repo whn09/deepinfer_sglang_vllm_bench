@@ -791,10 +791,10 @@ index 0000000..bb8fae1
 +raise SystemExit(1 if mismatches else 0)
 diff --git a/serve/openai_server.py b/serve/openai_server.py
 new file mode 100644
-index 0000000..43e21e8
+index 0000000..60f52d6
 --- /dev/null
 +++ b/serve/openai_server.py
-@@ -0,0 +1,669 @@
+@@ -0,0 +1,672 @@
 +"""Minimal OpenAI-compatible chat server on top of the DeepInfer offline engine.
 +
 +DeepInfer ships offline inference only. This wraps one `LLM` per data-parallel rank
@@ -955,6 +955,9 @@ index 0000000..43e21e8
 +        else:
 +            cache = HostPrefixCache(engine, size_bytes=int(args.hicache_size_gb * 2**30), num_state_slots=args.hicache_state_slots)
 +            engine.pe_do_save_kvcache = cache.on_prefill_step  # write-through at the end of every prefill
++            # Pin the host pools now, before reporting ready: pinning 32 GB per rank takes 14-50 s (ranks contend),
++            # and done lazily it lands on each rank's first request.
++            cache._allocate()
 +    out_q.put(("ready", dp_rank, None))
 +
 +    def mm_data():
