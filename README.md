@@ -2,7 +2,7 @@
 
 This repo compares three inference stacks serving `DeepSeek-V4.1-Flash-1017` on one 8×B200 box: same weights, same inputs, same metrics. The primary workload is the [InferenceX](https://inferencex.semianalysis.com/inference/deepseek-v41-flash?i_xmode=interactivity&i_seq=agentic-traces&i_prec=fp8) **AgentX** benchmark, and we first reproduce the published B200 points before comparing anything.
 
-**Roadmap and status: [#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8).** **Latest results: [`results/20261023_agentx/summary.md`](results/20261023_agentx/summary.md).**
+**Goal: [#21](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/21)** (DeepInfer ≥ vLLM / SGLang on AgentX, full Mooncake integration). **Roadmap and status: [#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8).** **Latest results: [`results/20261023_agentx/summary.md`](results/20261023_agentx/summary.md).**
 
 ## Results (AgentX, 4 GPUs per server, 3600 s per point)
 
@@ -92,7 +92,7 @@ Details are in the issues and `docs/`.
   - [#214](https://github.com/deepseek-ai/DeepInfer/pull/214): Mooncake KV transport for the PD split.
   - [#216](https://github.com/deepseek-ai/DeepInfer/pull/216): Mooncake Store L3 for the prefix cache.
 - **kvcache-ai/Mooncake**
-  - [#4873](https://github.com/kvcache-ai/Mooncake/pull/4873): nvlink_intra diagnostics for VMM buffers and PID namespaces.
+  - [#4873](https://github.com/kvcache-ai/Mooncake/pull/4873) (merged): nvlink_intra diagnostics for VMM buffers and PID namespaces.
   - [#4803 comment](https://github.com/kvcache-ai/Mooncake/issues/4803#issuecomment-6360317607): DeepInfer as a consumer of the per-sequence state contract.
 - Drafts and posted texts are kept in [`docs/upstream/`](docs/upstream).
 
@@ -127,7 +127,7 @@ results/   one directory per run; inferencex_public/ = published InferenceX poin
 
 本仓库在一台 8×B200 上对比三个推理框架运行 `DeepSeek-V4.1-Flash-1017` 的表现：同一份权重、同一批输入、同一套指标。主要负载是 InferenceX 的 **AgentX** benchmark，比较之前先复现官方公布的 B200 数据点。
 
-**Roadmap 和进度：[#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8)。最新结果：[`results/20261023_agentx/summary.md`](results/20261023_agentx/summary.md)。**
+**总目标：[#21](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/21)（AgentX 上 DeepInfer 达到或超过 vLLM / SGLang，并与 Mooncake 充分整合）。Roadmap 和进度：[#8](https://github.com/whn09/deepinfer_sglang_vllm_bench/issues/8)。最新结果：[`results/20261023_agentx/summary.md`](results/20261023_agentx/summary.md)。**
 
 ## 结果（AgentX，每个 server 4 卡，每点 3600 s）
 
@@ -163,7 +163,7 @@ B200 机器不固定，所有东西都放在 `/opt/dlami/nvme/bench_tmp`（`$WOR
 
 ## 提交给上游的内容
 
-见上方英文部分：给 DeepInfer #147 的两条建议都已被采纳（EPLB 默认关闭、fast tokenizer）；DeepInfer Draft PR #214（PD 的 Mooncake KV 传输）和 #216（前缀缓存的 Mooncake Store L3）；Mooncake PR #4873（nvlink_intra 诊断提示和文档），以及在 RFC #4803 下的评论。草稿和已发布的文字都保存在 `docs/upstream/`。
+见上方英文部分：给 DeepInfer #147 的两条建议都已被采纳（EPLB 默认关闭、fast tokenizer）；DeepInfer Draft PR #214（PD 的 Mooncake KV 传输）和 #216（前缀缓存的 Mooncake Store L3）；Mooncake PR #4873（nvlink_intra 诊断提示和文档，已合并），以及在 RFC #4803 下的评论。草稿和已发布的文字都保存在 `docs/upstream/`。
 
 ## 目录
 
