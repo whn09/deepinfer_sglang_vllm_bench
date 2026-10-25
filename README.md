@@ -87,7 +87,7 @@ Details are in the issues and `docs/`.
 ## Upstream contributions
 
 - **deepseek-ai/DeepInfer**
-  - #147: EPLB stalls ([comment](https://github.com/deepseek-ai/DeepInfer/pull/147#issuecomment-6334191794)) and fast prompt tokenization ([comment](https://github.com/deepseek-ai/DeepInfer/pull/147#issuecomment-6355311603)). Both were adopted in d7844a2 and 269a61f.
+  - #147: EPLB stalls ([comment](https://github.com/deepseek-ai/DeepInfer/pull/147#issuecomment-6334191794)) and fast prompt tokenization ([comment](https://github.com/deepseek-ai/DeepInfer/pull/147#issuecomment-6355311603)). Both were adopted in d7844a2 and 269a61f. Decode knobs (redundant experts with EPLB off, `--prefill-any-interval`): [comment](https://github.com/deepseek-ai/DeepInfer/pull/147#issuecomment-6391903548).
   - [#214](https://github.com/deepseek-ai/DeepInfer/pull/214): Mooncake KV transport for the PD split.
   - [#216](https://github.com/deepseek-ai/DeepInfer/pull/216): Mooncake Store L3 for the prefix cache.
 - **kvcache-ai/Mooncake**
