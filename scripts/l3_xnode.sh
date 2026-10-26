@@ -19,7 +19,12 @@ run "$A" "DI_IMAGE=$IMG MC_HOST=$AIP MC_SEGMENT='100 GB' MC_PROTOCOL=efa MC_DEVI
 echo "$(date +%H:%M:%S) engine A on $A: populate"
 run "$A" "$L3ENV DI_L3_HOST=$AIP HALF=a bash scripts/serve_deepinfer_agentx.sh > $W/logs/l3x_A.log 2>&1 && mkdir -p $S && \
     python3 bench/l3_restart_check.py populate --port 8888 --state $S/state.json --doc-tokens $DOC --warmup 8; docker rm -f bench-deepinfer > /dev/null"
-scp -q "$A:$S/state.json" /tmp/l3x_state.json 2> /dev/null && ssh "$B" "mkdir -p $S" 2> /dev/null && scp -q /tmp/l3x_state.json "$B:$S/state.json" 2> /dev/null
+# copy turn 1's answer to host B (retry: one-off ssh failures through the jump host happen)
+for i in 1 2 3 4 5; do
+    scp -q "$A:$S/state.json" /tmp/l3x_state.json 2> /dev/null && ssh "$B" "mkdir -p $S" 2> /dev/null \
+        && scp -q /tmp/l3x_state.json "$B:$S/state.json" 2> /dev/null && break
+    [ $i = 5 ] && { echo "could not copy state.json to $B" >&2; exit 1; }; sleep 5
+done
 echo "$(date +%H:%M:%S) engine B on $B: hit from the remote Store"
 OUT_B=$(run "$B" "$L3ENV DI_L3_HOST=$BIP HALF=a bash scripts/serve_deepinfer_agentx.sh > $W/logs/l3x_B.log 2>&1 && \
     python3 bench/l3_restart_check.py check --port 8888 --state $S/state.json --doc-tokens $DOC --warmup 8 --dump $S/B.json; \

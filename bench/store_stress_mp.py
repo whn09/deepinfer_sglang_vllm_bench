@@ -17,7 +17,7 @@ def worker(rank: int, a, out) -> None:
     s = MooncakeDistributedStore()
     rc = s.setup({"local_hostname": "127.0.0.1", "metadata_server": "http://127.0.0.1:18080/metadata",
                   "global_segment_size": 0, "local_buffer_size": 16 << 20, "protocol": a.protocol,
-                  "device_name": a.device, "master_server_addr": "127.0.0.1:50551"})
+                  "rdma_devices": a.device, "master_server_addr": "127.0.0.1:50551"})
     assert rc == 0, f"setup rc={rc}"
     pool = np.random.randint(0, 255, size=SLOTS * PAGE, dtype=np.uint8); s.register_buffer(pool.ctypes.data, pool.nbytes)
     dst = np.zeros(BATCH * G * PAGE, dtype=np.uint8); s.register_buffer(dst.ctypes.data, dst.nbytes)
