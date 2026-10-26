@@ -114,4 +114,4 @@ Harness pitfalls:
 
 - **#4956:** the default is now 1000 ms (ab812fb6). The PR description carries the cross-host table, and the review comment was posted as https://github.com/kvcache-ai/Mooncake/pull/4956#issuecomment-6424013913.
 - **Dead-peer cost re-measured at 1000 ms** (same-host Store, segment client killed 15 s into a 60 s run): 121 / 93 s, vs 117 / 105 s at 50 ms and 118 / 93 s count-only. Healthy 60 s run at 1000 ms: 0 failures.
-- **`transfer_engine_bench` fix (`s.ok() || s.IsBatchCleanupDeferred()`):** committed on the local branch `bench-free-batch-deferred` (47ff63fc) in `Mooncake-pr`. Not pushed or opened yet.
+- **`transfer_engine_bench` fix (`s.ok() || s.IsBatchCleanupDeferred()`):** upstream already has the identical change as kvcache-ai/Mooncake#4712 (open, mergeable, waiting for review). Instead of a duplicate PR, the EFA validation was posted there. Our branch `whn09:bench-free-batch-deferred` (47ff63fc) stays unused.
