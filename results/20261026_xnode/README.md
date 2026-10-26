@@ -34,7 +34,10 @@ The Store (master + 100 GB segment, EFA `rdmap113s0`) runs on B200-1.
   - **Cause:** `EfaContext::submitSlicesOnPeer` fails the slices after `kMaxStalledWaves = 1024` consecutive `FI_EAGAIN` waves, and the limit is hard-coded and counted in waves, not time. The failing log line reads `1024 consecutive FI_EAGAIN waves posted nothing ...; wr_depth=1/2048; cq_outstanding=1; last_completion=0-1ms ago; this_peer_inflight=1`. The peer is healthy (a completion arrived <1 ms ago, one op in flight); the provider is only briefly busy, and 1024 waves elapse in microseconds.
   - `MC_EFA_CQ_DRAIN_TIMEOUT_MS` is not it: 10000 still fails, and 0 makes it far worse.
   - **Suggested fix:** also require no completion progress for some wall time (e.g. `msSinceLastCompletion()` > a few ms) before declaring the peer stalled, or make the limit configurable.
-  - Workaround until then: build Mooncake at ≤ 12a7e9f1 (we use dd1217b). #216's one-retry also absorbs it.
+  - **Fix: kvcache-ai/Mooncake#4956.** It adds a 50 ms wall-clock floor (`MC_EFA_STALL_MIN_MS`).
+    - Healthy peer: 0 failures and 4.35 GB/s, vs 37 failures and 3.71 GB/s with the old check.
+    - Dead peer: no slower to fail (121 vs 120 s mean over 3 runs).
+  - Workaround until it lands: build Mooncake at ≤ 12a7e9f1 (we use dd1217b). #216's one-retry also absorbs it.
 - **#216 now retries failed objects once before tripping the breaker** (625606d), with new counters `l3_put_retried` / `l3_get_retried`. The L3 runs above use Mooncake dd1217b plus this change.
 
 <details><summary>中文</summary>
