@@ -29,7 +29,12 @@ The Store (master + 100 GB segment, EFA `rdmap113s0`) runs on B200-1.
 
 ## Findings along the way
 - **Mooncake `setup()` reads `rdma_devices`, not `device_name`.** With the wrong key, the client silently auto-discovers all 8 EFA devices. Fixed in `serve_deepinfer_agentx.sh` and `bench/store_stress_mp.py`.
-- **Mooncake client regression between dd1217b and 83f8f877.** With a 4-process EFA stress run (20 s, batch 16), dd1217b gives 0 failures; 83f8f877 gives ~30 `TRANSFER_FAIL` (-800) per ~180K puts (~0.015%), plus a few get failures. On AgentX this tripped #216's breaker on the first put of every rank. Bisect in progress.
+- **Mooncake client regression between dd1217b and 83f8f877.** With a 4-process EFA stress run (20 s, batch 16), dd1217b gives 0 failures; 83f8f877 gives ~30 `TRANSFER_FAIL` (-800) per ~180K puts (~0.015%), plus a few get failures. On AgentX this tripped #216's breaker on the first put of every rank.
+  - **Bisected to kvcache-ai/Mooncake 487da6af** ("[TE] fix(efa): evict stale peer on reconnect + clearer fi_av_insert logs", #2063). Its parent 12a7e9f1 has 0 failures; 487da6af has 57 put + 49 get failures in 30 s.
+  - **Cause:** `EfaContext::submitSlicesOnPeer` fails the slices after `kMaxStalledWaves = 1024` consecutive `FI_EAGAIN` waves, and the limit is hard-coded and counted in waves, not time. The failing log line reads `1024 consecutive FI_EAGAIN waves posted nothing ...; wr_depth=1/2048; cq_outstanding=1; last_completion=0-1ms ago; this_peer_inflight=1`. The peer is healthy (a completion arrived <1 ms ago, one op in flight); the provider is only briefly busy, and 1024 waves elapse in microseconds.
+  - `MC_EFA_CQ_DRAIN_TIMEOUT_MS` is not it: 10000 still fails, and 0 makes it far worse.
+  - **Suggested fix:** also require no completion progress for some wall time (e.g. `msSinceLastCompletion()` > a few ms) before declaring the peer stalled, or make the limit configurable.
+  - Workaround until then: build Mooncake at ≤ 12a7e9f1 (we use dd1217b). #216's one-retry also absorbs it.
 - **#216 now retries failed objects once before tripping the breaker** (625606d), with new counters `l3_put_retried` / `l3_get_retried`. The L3 runs above use Mooncake dd1217b plus this change.
 
 <details><summary>中文</summary>
@@ -50,6 +55,6 @@ The Store (master + 100 GB segment, EFA `rdmap113s0`) runs on B200-1.
 
 **过程中的发现：**
 - Mooncake `setup()` 读的是 `rdma_devices`，不是 `device_name`。键名写错时客户端会静默地自动发现全部 8 块 EFA 网卡，已修正。
-- **Mooncake 客户端在 dd1217b 和 83f8f877 之间出现了回归：** 4 进程 EFA 压测下，dd1217b 零失败，83f8f877 约 0.015% 的 put 返回 `TRANSFER_FAIL`（-800），还有少量 get 失败。在 AgentX 上，这会让 #216 的熔断在每个 rank 的第一批 put 时就被触发。二分定位正在进行。
+- **Mooncake 客户端在 dd1217b 和 83f8f877 之间出现了回归：** 4 进程 EFA 压测下，dd1217b 零失败，83f8f877 约 0.015% 的 put 返回 `TRANSFER_FAIL`（-800），还有少量 get 失败。在 AgentX 上，这会让 #216 的熔断在每个 rank 的第一批 put 时就被触发。二分定位到 kvcache-ai/Mooncake 的 487da6af（#2063，"evict stale peer on reconnect"）：`EfaContext::submitSlicesOnPeer` 在连续 `kMaxStalledWaves = 1024` 轮 `FI_EAGAIN` 后就判失败，这个上限是写死的、按轮数计，不按时间。日志显示当时完成事件 0–1 ms 前刚回来过、只有 1 个请求在途，peer 是健康的，provider 只是短暂繁忙。`MC_EFA_CQ_DRAIN_TIMEOUT_MS` 不是原因。建议的修法：判定卡死前同时要求一段时间内没有任何完成事件，或者把这个上限做成可配置。修好之前的绕法：用 ≤ 12a7e9f1 的版本（我们用 dd1217b）；#216 的重试一次也能吸收这类失败。
 - #216 现在会先把失败的对象重试一次，重试仍失败才触发熔断（625606d）。上面的 L3 测试用的是 Mooncake dd1217b 加上这个改动。
 </details>
