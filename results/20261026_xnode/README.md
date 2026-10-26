@@ -34,7 +34,7 @@ The Store (master + 100 GB segment, EFA `rdmap113s0`) runs on B200-1.
   - **Cause:** `EfaContext::submitSlicesOnPeer` fails the slices after `kMaxStalledWaves = 1024` consecutive `FI_EAGAIN` waves, and the limit is hard-coded and counted in waves, not time. The failing log line reads `1024 consecutive FI_EAGAIN waves posted nothing ...; wr_depth=1/2048; cq_outstanding=1; last_completion=0-1ms ago; this_peer_inflight=1`. The peer is healthy (a completion arrived <1 ms ago, one op in flight); the provider is only briefly busy, and 1024 waves elapse in microseconds.
   - `MC_EFA_CQ_DRAIN_TIMEOUT_MS` is not it: 10000 still fails, and 0 makes it far worse.
   - **Suggested fix:** also require no completion progress for some wall time (e.g. `msSinceLastCompletion()` > a few ms) before declaring the peer stalled, or make the limit configurable.
-  - **Fix: kvcache-ai/Mooncake#4956.** It adds a 50 ms wall-clock floor (`MC_EFA_STALL_MIN_MS`).
+  - **Fix: kvcache-ai/Mooncake#4956.** It adds a wall-clock floor (`MC_EFA_STALL_MIN_MS`). The default was raised from 50 ms to **1000 ms** after cross-host validation ([docs/upstream/mooncake_efa_v0314_release_validation.md](../../docs/upstream/mooncake_efa_v0314_release_validation.md)): at 50 ms, a cross-host 1-GPU read still failed 4/4 runs. Dead-peer cost at 1000 ms is within noise.
     - Healthy peer: 0 failures and 4.35 GB/s, vs 37 failures and 3.71 GB/s with the old check.
     - Dead peer: no slower to fail (121 vs 120 s mean over 3 runs).
   - Workaround until it lands: build Mooncake at ≤ 12a7e9f1 (we use dd1217b). #216's one-retry also absorbs it.
